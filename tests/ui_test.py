@@ -202,10 +202,12 @@ def test_A(page, app, shots):
     wait_ops(page, 2)
     final, tag = app.final(R)
     c = app.src["claude_code"]
-    check(np.array_equal(final[c != 255], c[c != 255]) and (tag[c != 255] == 4).all(), "apply to all sections: every section = Claude Code")
+    s1v, s2c = s1 & (v != 255), s2 & (c != 255)
+    check(np.array_equal(final[s2c], c[s2c]) and (tag[s2c] == 4).all(), "apply to all (not started) on S2: S2 = Claude Code")
+    check(np.array_equal(final[s1v], v[s1v]) and (tag[s1v] == 3).all(), "apply to all does not overwrite S1, which already has a pick")
     ops = app.get(f"/api/state?reviewer={R}")["ops"]
-    check(ops[-1]["scope"] == "all" and ops[0]["scope"] == "section" and ops[0]["sections"] == [secs[0]],
-          "ops logged with their section scope")
+    check(ops[-1]["scope"] == "section" and ops[-1]["sections"] == [secs[1]] and ops[0]["scope"] == "section" and ops[0]["sections"] == [secs[0]],
+          "ops logged with their section scope (only the untouched section)")
     lines = app.ops_file(R).read_text().splitlines()
     check(all("cells" not in json.loads(l) and len(l) < 2000 for l in lines),
           f"whole-section ops store their sections, not cell lists ({max(map(len, lines))} bytes/line)")
@@ -215,7 +217,7 @@ def test_A(page, app, shots):
     wait_ops(page, 3)
     final, tag = app.final(R)
     check(np.array_equal(final[s2], bill[s2]) and (tag[s2] == 2).all(), "Restart from… Bill_eugene_code for S2")
-    check((tag[s1 & (c != 255)] == 4).all(), "S1 keeps its Claude pick")
+    check((tag[s1v] == 3).all(), "S1 keeps its Vestrum pick")
 
     app.post("/api/comments", {"reviewer": R, "item": {"text": "keep me", "category": "Other", "targets": [],
                                                         "geometry": {"type": "Point", "px": [[float(app.px[0]), float(app.py[0])]]}}})
@@ -224,7 +226,7 @@ def test_A(page, app, shots):
     wait_ops(page, 4)
     final, tag = app.final(R)
     check((tag[s2] == 0).all() and np.array_equal(final[s2], bill[s2]), "Clear S2: layer empty for S2")
-    check((tag[s1 & (c != 255)] == 4).all(), "Clear S2 leaves S1 alone")
+    check((tag[s1v] == 3).all(), "Clear S2 leaves S1 alone")
     page.wait_for_timeout(300)
     check(card.is_visible() and f"for {secs[1]}" in card.inner_text(), "start card back after Clear")
     shot(page, shots, "A3_S2_cleared")
@@ -252,8 +254,38 @@ def test_A(page, app, shots):
     page.keyboard.press("Control+z")
     wait_ops(page, 3)
     final, tag = app.final(R)
-    check((tag[s2] == 2).all() and (tag[s1 & (c != 255)] == 4).all(), "Undo of Clear-all restores every section")
+    check((tag[s2] == 2).all() and (tag[s1v] == 3).all(), "Undo of Clear-all restores every section")
     shot(page, shots, "A4_after_undo")
+
+    # Restart from… -> all sections overwrites everything, after a confirm that counts the worked sections
+    page.click("#restartBtn")
+    page.locator("#ctx .mi", has_text="Claude Code labels (all sections)").click()
+    page.wait_for_selector("#dlg[open]")
+    t = page.locator("#dlg").inner_text()
+    check("2 of 2 sections" in t and secs[0] in t and secs[1] in t, f"Restart all asks first, naming the worked sections: '{t[:120]}'")
+    shot(page, shots, "A5_restart_all_confirm")
+    page.locator("#dlg button[value=cancel]").click()
+    page.wait_for_timeout(400)
+    check(len(app.get(f"/api/state?reviewer={R}")["ops"]) == 3, "Cancel: nothing applied")
+    page.click("#restartBtn")
+    page.locator("#ctx .mi", has_text="Claude Code labels (all sections)").click()
+    page.locator("#restartAllOk").click()
+    wait_ops(page, 4)
+    final, tag = app.final(R)
+    check(np.array_equal(final[c != 255], c[c != 255]) and (tag[c != 255] == 4).all() and app.get(f"/api/state?reviewer={R}")["ops"][-1]["scope"] == "all",
+          "confirmed Restart all: every section = Claude Code")
+    page.keyboard.press("Control+z")
+    wait_ops(page, 3)
+    # with every section untouched, the start card's 'apply to all' covers all of them
+    page.click("#layerClearBtn")
+    page.locator("#ctx .mi", has_text="all sections").click()
+    wait_ops(page, 4)
+    page.wait_for_timeout(300)
+    card.locator("#startAll").check()
+    card.locator("[data-start=vestrum]").click()
+    wait_ops(page, 5)
+    final, tag = app.final(R)
+    check((tag[v != 255] == 3).all() and app.get(f"/api/state?reviewer={R}")["ops"][-1]["scope"] == "all", "start card on an empty layer: apply to all = every section")
 
     # a log written before section ops were stored by scope (explicit cells) still replays
     L = "tester_a_legacy"
@@ -489,7 +521,313 @@ def test_C(page, app, shots):
     shot(page, shots, "C7_final")
 
 
-STEPS = {"A": test_A, "C": test_C}
+# ------------------------------------------------------------------------------------------- step E
+EPI = ["Keratin", "Squam1", "Squam2", "Squam3", "Basal(core)", "Basal(stem)", "Basal(ifn)"]
+
+
+def test_E(page, app, shots):
+    """Assisted selection: wand, compartment wand, Novae click, refine border, guess + Suggest, review queue, efficiency log."""
+    import pandas as pd
+    from scipy.spatial import Delaunay
+    R = "tester_e"
+    open_ui(page, app, R)
+    page.wait_for_function("PathQC.S.assist && PathQC.S.comp", timeout=30000)
+    cells = pd.read_csv(app.pack / "cells.tsv.gz", sep="\t", dtype=str, keep_default_na=False)
+    bill_name = cells.bill_eugene_code.values
+    novae = {k: cells[k].values for k in ("novae5", "novae10")}
+    xmm, ymm = cells.x_mm.astype(float).values, cells.y_mm.astype(float).values
+    epi = np.isin(bill_name, EPI)
+    s1 = app.sec == 0
+    check(page.locator("#modes3").is_visible() and page.locator("#modes3 [data-mode=comp]").is_visible()
+          and page.locator("#modes3 [data-mode=novae]").is_visible(), "Assist group shown with every tool (pack has stains + Novae)")
+    gap = page.evaluate("PathQC.S.gap")
+    check(30 <= gap <= 60, f"max gap slider default {gap} um (sparse demo pack: wider than the real slide's 30 um)")
+
+    # the test's own graph: Delaunay per section, edges <= gap (um)
+    def graph(g):
+        nb = [[] for _ in range(app.n)]
+        for k in np.unique(app.sec):
+            idx = np.nonzero(app.sec == k)[0]
+            xy = np.column_stack([xmm[idx], ymm[idx]]) * 1000
+            t = Delaunay(xy).simplices
+            e = np.unique(np.sort(np.vstack([t[:, [0, 1]], t[:, [1, 2]], t[:, [0, 2]]]), 1), axis=0)
+            e = e[np.hypot(*(xy[e[:, 0]] - xy[e[:, 1]]).T) <= g]
+            for a, b in idx[e]:
+                nb[a].append(b); nb[b].append(a)
+        return nb
+    nb = graph(gap)
+
+    def component(seed, ok):
+        seen, st = {seed}, [seed]
+        while st:
+            i = st.pop()
+            for j in nb[i]:
+                if ok[j] and j not in seen:
+                    seen.add(j); st.append(j)
+        return seen
+
+    go_section(page, 0)
+    page.locator("#startCard [data-start=bill_eugene_code]").click()
+    wait_ops(page, 1)
+    nops = 1
+
+    from scipy.spatial import cKDTree
+    nn_px = cKDTree(np.column_stack([app.px, app.py])).query(np.column_stack([app.px, app.py]), k=2)[0][:, 1]
+
+    def click_cell(k, cands, mods=()):
+        """Click the first candidate cell that is on panel k (not under the popover/header) and at least
+        2 screen px from its nearest neighbour (WebKit rounds mouse coordinates to whole pixels)."""
+        a, b = client(page, k, 0, 0), client(page, k, 1000, 0)
+        scale = (b[0] - a[0]) / 1000
+        for i in sorted(cands, key=lambda i: nn_px[i] * scale < 2):
+            x, y = client(page, k, app.px[i], app.py[i])
+            if page.evaluate(f"(() => {{ const e = document.elementFromPoint({x}, {y}); return !!e && e.closest('.panel') === PathQC.S.panels[{k}].el && !e.closest('.ph'); }})()"):
+                for m in mods:
+                    page.keyboard.down(m)
+                page.mouse.click(x, y)
+                for m in mods:
+                    page.keyboard.up(m)
+                page.wait_for_function("!PathQC.S.busy", timeout=5000)
+                page.wait_for_timeout(350)
+                return int(i)
+        raise AssertionError("no clickable candidate cell")
+
+    def drag_rect(k, x0, y0, x1, y1):
+        """Rectangle tool drag on panel k between two image points, kept clear of the panel header."""
+        r = page.evaluate(f"(() => {{ const b = PathQC.S.panels[{k}].el.getBoundingClientRect(); return [b.left, b.top, b.right, b.bottom]; }})()")
+        a, b = client(page, k, x0, y0), client(page, k, x1, y1)
+        cl = lambda p: (min(max(p[0], r[0] + 4), r[2] - 4), min(max(p[1], r[1] + 40), r[3] - 4))
+        a, b = cl(a), cl(b)
+        page.keyboard.press("r")
+        page.mouse.move(*a); page.mouse.down(); page.mouse.move(*b, steps=5); page.mouse.up(); page.wait_for_timeout(250)
+        return sel_list(page)
+
+    def biggest(mask, cands):
+        """Candidates ordered by the size of their same-class component (largest first)."""
+        size = {}
+        out = []
+        for i in cands:
+            if i not in size:
+                c = component(i, mask)
+                for j in c:
+                    size[j] = len(c)
+            out.append(i)
+        return sorted(out, key=lambda i: -size[i])
+
+    def central(mask, sec=0):
+        """Cells of the mask in a section, ordered from the section centre outwards."""
+        idx = np.nonzero(mask & (app.sec == sec))[0]
+        cx, cy = np.median(app.px[app.sec == sec]), np.median(app.py[app.sec == sec])
+        return idx[np.argsort(np.hypot(app.px[idx] - cx, app.py[idx] - cy))][:400]
+
+    # 1. magic wand on the Bill panel: same label, connected, maximal
+    page.keyboard.press("w")
+    page.wait_for_timeout(300)
+    check(page.locator("#assistBar #abGap").is_visible() and page.locator("#abJump").is_visible(), "W: wand mode shows max gap + jump")
+    ker = bill_name == "Keratin"
+    deg = np.array([sum(ker[j] for j in nb[i]) for i in range(app.n)])
+    seed = click_cell(2, biggest(ker, [i for i in central(ker) if deg[i] >= 3]))
+    s = sel_list(page)
+    comp = component(seed, ker)
+    check(seed in s and all(bill_name[i] == "Keratin" for i in s), f"wand on a Bill Keratin cell: only Keratin cells ({len(s)})")
+    check(s == comp and len(s) >= 20, f"wand region = the connected Keratin component of the seed (graph check, {len(comp)} cells; diff {sorted(s ^ comp)[:6]})")
+    shot(page, shots, "E1_wand_keratin")
+    seed2 = click_cell(2, biggest(bill_name == "Squam2", [i for i in central(bill_name == "Squam2") if i not in s]), mods=["Shift"])
+    s2 = sel_list(page)
+    check(s2 == s | component(seed2, bill_name == "Squam2"), f"Shift+wand adds the Squam2 region ({len(s)} -> {len(s2)})")
+    click_cell(2, [seed], mods=["Alt"])
+    check(sel_list(page) == s2 - s, "Alt+wand subtracts the Keratin region again")
+    page.keyboard.press("Escape")
+    page.select_option("#abJump", "1")
+    seed = click_cell(2, [seed])
+    sj = sel_list(page)
+    check(sj >= s and all(bill_name[i] == "Keratin" for i in sj), f"jump 1: superset, still only Keratin ({len(s)} -> {len(sj)})")
+    page.select_option("#abJump", "0")
+    # Ctrl limits the flood to the current selection
+    page.keyboard.press("Escape")
+    sx = [app.px[i] for i in s]; sy = [app.py[i] for i in s]
+    rect = drag_rect(2, min(sx) - 30, min(sy) - 60, (min(sx) + max(sx)) / 2, max(sy) + 60)
+    check(len(rect & s) > 5 and not s <= rect, f"rectangle over part of the Keratin region ({len(rect & s)} of {len(s)})")
+    page.keyboard.press("w")
+    page.wait_for_timeout(300)
+    click_cell(2, list(rect & s), mods=["Control"])
+    sc = sel_list(page)
+    check(sc and sc <= rect and sc <= s and all(bill_name[i] == "Keratin" for i in sc), f"Ctrl+wand keeps only Keratin cells inside the selection ({len(rect)} -> {len(sc)})")
+    page.keyboard.press("Escape")
+
+    # wand on the reviewer panel uses the reviewer's labels; apply a relabel to set up Suggest later
+    seed = click_cell(1, biggest(ker, [i for i in central(ker) if deg[i] >= 3]))
+    s = sel_list(page)
+    check(s == component(seed, ker), "wand on the reviewer panel (= Bill after the start pick) gives the same region")
+    sq3 = page.evaluate("PathQC.S.vocab.find(v => v.name === 'Squam3').code")
+    page.select_option("#pop [data-a=to]", str(sq3))
+    page.locator("#pop [data-a=relabel]").click()
+    nops += 1; wait_ops(page, nops)
+    op = json.loads(app.ops_file(R).read_text().splitlines()[-1])
+    check(op["tool"] == "wand" and op["tools"] == ["wand"] and op["sel_ms"] > 0 and op["n"] == len(s), f"relabel op logs tool=wand, sel_ms={op['sel_ms']}")
+
+    # 2. guess + Suggest on that region (agents say Keratin, the reviewer now says Squam3)
+    g = page.locator("#selGuess").inner_text()
+    check("Epithelial" in g and "Novae" in g and "agree: Keratin" in g and "yours Squam3" in g, f"guess line: '{g}'")
+    page.locator("#pop [data-a=suggest]").click()
+    kcode = page.evaluate("PathQC.S.vocab.find(v => v.name === 'Keratin').code")
+    check(page.evaluate("PathQC.S.target") == kcode and page.evaluate("[...PathQC.S.ticked]") == [sq3]
+          and page.locator("#pop [data-a=to]").input_value() == str(kcode), "Suggest pre-sets target Keratin and ticks Squam3 (does not apply)")
+    check(len(app.get(f"/api/state?reviewer={R}")["ops"]) == nops, "Suggest applied nothing by itself")
+    shot(page, shots, "E2_guess_suggest")
+    page.keyboard.press("Enter")
+    nops += 1; wait_ops(page, nops)
+    op = json.loads(app.ops_file(R).read_text().splitlines()[-1])
+    final, _ = app.final(R)
+    check(op["to_name"] == "Keratin" and "suggest" in op["tools"] and (final[list(s)] == kcode).all(), "Enter after Suggest relabels back to Keratin; op tools include 'suggest'")
+    page.keyboard.press("Escape")
+
+    # 3. compartment wand: an epithelial cell -> the section's epithelium
+    page.keyboard.press("k")
+    page.wait_for_timeout(300)
+    check(page.locator("#abP").is_visible() and "≥" in page.locator("#abPV").inner_text(), f"K: PanCK threshold slider shown ({page.locator('#abPV').inner_text()})")
+    seed = click_cell(2, central(epi & (cells.panck.astype(float).values > 6000)))
+    s = np.array(sorted(sel_list(page)))
+    truth = epi & s1
+    prec, rec = epi[s].mean(), np.isin(np.nonzero(truth)[0], s).mean()
+    check(prec >= 0.95 and rec >= 0.9 and (app.sec[s] == 0).all(), f"compartment wand: epithelium of S1, precision {prec:.3f}, recall {rec:.3f}")
+    shot(page, shots, "E3_compartment")
+    t0 = page.locator("#abPV").inner_text()
+    page.locator("#abP").fill("1")
+    page.wait_for_timeout(500)
+    check(page.locator("#abPV").inner_text() != t0, f"moving the PanCK slider moves the threshold ({t0} -> {page.locator('#abPV').inner_text()})")
+    page.locator("#abP").fill("0")
+    page.wait_for_timeout(500)
+    page.keyboard.press("Escape")
+
+    # 4. Novae region at two resolutions
+    page.keyboard.press("n")
+    page.wait_for_timeout(300)
+    seed = click_cell(2, central(epi))
+    s = sel_list(page)
+    dom = novae["novae10"][seed]
+    check(all(novae["novae10"][i] == dom for i in s) and s == component(seed, novae["novae10"] == dom), f"Novae click: connected cells of domain {dom} ({len(s)})")
+    page.select_option("#abRes", "novae5")
+    page.wait_for_timeout(400)
+    seed = click_cell(2, [seed])
+    s5 = sel_list(page)
+    d5 = novae["novae5"][seed]
+    check(all(novae["novae5"][i] == d5 for i in s5) and s5 >= s, f"resolution 5: domain {d5}, coarser region ({len(s)} -> {len(s5)})")
+    page.keyboard.press("Escape")
+
+    # 5. refine border (random walker) on a box straddling the epithelium / stroma border
+    bottom = 2.2 + 0.25 * np.sin(1.7 * xmm) - 0.48                 # demo epithelium lower edge (mm)
+    zone = s1 & (xmm > 1.1) & (xmm < 1.7) & (ymm > bottom - 0.25) & (ymm < bottom + 0.2)
+    zb = (app.px[zone].min(), app.py[zone].min(), app.px[zone].max(), app.py[zone].max())
+    box = np.array(sorted(drag_rect(1, *zb)))
+    check(0.2 < epi[box].mean() < 0.8, f"box straddles the border ({len(box)} cells, {epi[box].mean():.0%} epithelial)")
+    page.keyboard.press("g")
+    page.wait_for_timeout(300)
+    check(page.evaluate("PathQC.S.mode") == "walker", "G: refine-border mode with a selection")
+    yb = ymm[box]
+    ins = [i for i in box[np.argsort(-yb)] if epi[i]][:2]
+    outs = [i for i in box[np.argsort(yb)] if not epi[i]][:2]
+    for i in ins:
+        click_cell(2, [i])
+    for i in outs:
+        click_cell(2, [i], mods=["Alt"])
+    page.wait_for_timeout(400)
+    new = sel_list(page)
+    pred = np.isin(box, list(new))
+    acc = (pred == epi[box]).mean()
+    check(acc >= 0.9, f"random walker separates epithelium from stroma in the box: accuracy {acc:.3f} vs truth ({len(new)} selected)")
+    shot(page, shots, "E4_walker")
+    page.locator("#pop [data-base=bill_eugene_code]").click()          # an op made from the refined selection
+    nops += 1; wait_ops(page, nops)
+    op = json.loads(app.ops_file(R).read_text().splitlines()[-1])
+    check(op["tool"] == "walker" and op["tools"] == ["rect", "walker"] and op["n"] == len(new), f"op logs tool=walker after rect ({op['tools']})")
+    page.keyboard.press("Escape")
+    check(page.evaluate("PathQC.S.mode") == "pan" and page.evaluate("PathQC.S.walk") is None, "Esc leaves refine mode and drops the seeds")
+    # snap: keep the majority compartment
+    box = np.array(sorted(drag_rect(1, *zb)))
+    page.locator("#pop [data-a=snap]").click()
+    page.wait_for_timeout(200)
+    sn = np.array(sorted(sel_list(page)))
+    comp_arr = np.array(page.evaluate("Array.from(PathQC.S.comp)"))
+    check(len(sn) < len(box) and len(set(comp_arr[sn])) == 1 and set(sn) <= set(box), f"Snap to compartment keeps one compartment ({len(box)} -> {len(sn)})")
+    # the walker's seed toggle: with "outside" on, a plain click places an outside seed (Alt is not needed)
+    page.keyboard.press("g")
+    page.wait_for_timeout(300)
+    check("Alt+click = outside seed" in page.locator("#pop").inner_text() and page.locator("#abSide").is_visible(),
+          "refine mode says what Alt means here (outside seed, not subtract) and shows the inside/outside toggle")
+    page.locator("#abSide [data-side=out]").click()
+    click_cell(2, [i for i in box if not epi[i]][:5])
+    check(page.evaluate("[PathQC.S.walk.inside.length, PathQC.S.walk.outside.length]") == [0, 1], "toggle on 'outside': a plain click places an outside seed")
+    shot(page, shots, "E4b_walker_toggle")
+    page.keyboard.press("Escape")
+
+    # 6. review queue
+    page.locator("#tabs [data-tab=review]").click()
+    page.wait_for_function("PathQC.S.queue && PathQC.S.queue.kind === 'any'", timeout=20000)
+    q = app.get(f"/api/assist/queue?reviewer={R}&kind=any")
+    sizes, scores = [it["n"] for it in q["items"]], [it["score"] for it in q["items"]]
+    check(len(sizes) >= 3 and scores == sorted(scores, reverse=True) and 20 <= min(sizes) and max(sizes) <= 1500,
+          f"queue: {len(sizes)} hotspots, 20-1500 cells, ranked by expected fixes {scores[:5]}")
+    b_, v_, c_ = (app.src[k].astype(int) for k in SRC)
+    vo, co = (v_ != 255) & (v_ != b_), (c_ != 255) & (c_ != b_)
+    agent = np.where(vo & (~co | (v_ == c_)), v_, np.where(co & ~vo, c_, -2))
+    pure = True
+    for it in q["items"][:12]:
+        cl = np.array(app.get(f"/api/assist/queue/any/{it['id']}?reviewer={R}")["cells"])
+        pure &= len(set(zip(b_[cl], agent[cl], novae["novae10"][cl]))) == 1
+    check(pure, "each 'any' item is one (Bill label, agent label) confusion in one Novae domain")
+    import sys as _s; _s.path.insert(0, str(ROOT))
+    from server.assist import Assist
+    from server.pack import Pack
+    big = np.nonzero(app.sec == 0)[0][:4000]
+    ch = Assist(Pack(app.pack), app.tmp / "cache")._chunks(big)
+    check(max(map(len, ch)) <= 1500 and np.array_equal(np.sort(np.concatenate(ch)), big), f"a 4,000-cell item is cut into spatial chunks {sorted(map(len, ch))}")
+    check(page.locator("#reviewPane .item").count() == len(sizes) and f"/ {len(sizes)} done" in page.locator("#qProg").inner_text(), "queue listed in the Review tab with progress")
+    page.keyboard.press("j")
+    page.wait_for_function("PathQC.S.selList.length > 0 && PathQC.S.selTool === 'queue'", timeout=10000)
+    first = q["items"][0]
+    cells0 = set(app.get(f"/api/assist/queue/any/{first['id']}?reviewer={R}")["cells"])
+    check(sel_list(page) == cells0, f"J selects item #1 ({first['n']} cells, {first['section']})")
+    disp = (app.src["vestrum"] != app.src["bill_eugene_code"]) | (app.src["claude_code"] != app.src["bill_eugene_code"])
+    check(np.mean([disp[i] for i in cells0]) > 0.6, "item cells are mostly disputed")
+    shot(page, shots, "E5_queue_next")
+    page.locator("#pop [data-base=claude_code]").click()
+    nops += 1; wait_ops(page, nops)
+    page.wait_for_function("PathQC.S.queue.n_done === 1", timeout=10000)
+    check("1 / " in page.locator("#qProg").inner_text() and page.locator("#reviewPane .item.done").count() == 1, f"item marked done after the pick: '{page.locator('#qProg').inner_text()}'")
+    page.keyboard.press("Escape")
+    page.keyboard.press("j")
+    page.wait_for_function(f"PathQC.S.queue.cur === 1 && PathQC.S.selList.length === {q['items'][1]['n']}", timeout=10000)
+    check(sel_list(page) == set(app.get(f"/api/assist/queue/any/{q['items'][1]['id']}?reviewer={R}")["cells"]), "J again goes to the next item not done")
+    page.keyboard.press("Shift+J")
+    page.wait_for_function(f"PathQC.S.queue.cur === 0 && PathQC.S.selList.length === {first['n']}", timeout=10000)
+    check(sel_list(page) == cells0, "Shift+J goes back to item #1")
+    page.keyboard.press("Escape")
+    page.keyboard.press("Control+z")
+    nops -= 1; wait_ops(page, nops)
+    page.wait_for_function("PathQC.S.queue.n_done === 0", timeout=10000)
+    check(True, "undo of the pick un-marks the item")
+    page.locator("#qKind [data-k=both]").click()
+    page.wait_for_function("PathQC.S.queue.kind === 'both'", timeout=10000)
+    qb = app.get(f"/api/assist/queue?reviewer={R}&kind=both")
+    check(page.locator("#reviewPane .item").count() == len(qb["items"]), f"toggle to 'both agents agree' list ({len(qb['items'])} items on the demo)")
+    shot(page, shots, "E6_review_tab")
+
+    # 7. efficiency log in ops.jsonl and summary.json
+    lines = [json.loads(l) for l in app.ops_file(R).read_text().splitlines()]
+    tools = [o.get("tool") for o in lines if o["op"] in ("base", "relabel")]
+    check(tools == ["section", "wand", "wand", "walker", "queue"], f"ops.jsonl tools in order: {tools}")
+    undo_l = [o for o in lines if o["op"] == "undo"]
+    check(undo_l and undo_l[-1].get("tool") == "queue", "undo record names the undone op's tool")
+    sv = app.post("/api/save", {"reviewer": R, "image": False})
+    summ = json.loads((Path(sv["dir"]) / "summary.json").read_text())
+    eff = summ["efficiency_by_tool"]
+    check(eff["wand"]["n_ops"] == 2 and eff["wand"]["undone"] == 0 and eff["wand"]["median_ms"] > 0
+          and eff["queue"] == {"n_ops": 1, "cells": first["n"], "median_ms": eff["queue"]["median_ms"], "undone": 1}
+          and eff["section"]["n_ops"] == 1 and eff["walker"]["n_ops"] == 1, f"summary.json efficiency_by_tool: {eff}")
+
+
+STEPS = {"A": test_A, "C": test_C, "E": test_E}
 
 
 def main():

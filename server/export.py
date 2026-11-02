@@ -10,6 +10,7 @@ import pandas as pd
 import pyvips
 from PIL import Image, ImageDraw, ImageFont
 
+from .assist import efficiency
 from .session import TAG_NAMES
 
 BAND = 2048
@@ -110,6 +111,7 @@ def write_results(pack, sess, out_root: Path):
         "cells_by_base_method": picks[picks.op == "base"].groupby("chosen_as_base").n_cells.sum().to_dict(),
         "n_comments": len(sess.comments), "n_annotations": len(sess.annotations),
         "changed_from_bill_eugene_code": int((root[final] != root[pack.src["bill_eugene_code"]]).sum()),
+        "efficiency_by_tool": efficiency(sess.ops),
     }
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
     return out, final, root

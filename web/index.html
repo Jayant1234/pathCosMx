@@ -40,6 +40,16 @@
   <span class="grow"></span>
   <button class="btn" id="undoBtn" title="Undo last edit (Ctrl+Z)">Undo</button>
 </div>
+<div class="toolbar assistbar" id="assistBar" hidden>
+  <div class="seg" id="modes3" hidden title="Assisted selection: each tool only makes a selection; nothing changes until you confirm in the box">
+    <span class="seglbl">Assist</span>
+    <button data-mode="wand" title="Magic wand: click a cell; selects the connected cells with the same label in that panel (W)">Wand <kbd>W</kbd></button>
+    <button data-mode="comp" title="Compartment wand: connected epithelium (PanCK) or immune (CD45) region around the clicked cell (K)">Compartment <kbd>K</kbd></button>
+    <button data-mode="novae" title="Novae region: connected cells of the clicked cell's Novae domain (N)">Novae <kbd>N</kbd></button>
+    <button data-mode="walker" title="Refine border of the selection (random walker): click inside, Alt+click outside (G)">Refine <kbd>G</kbd></button>
+  </div>
+  <span class="abopts" id="abOpts"></span>
+</div>
 
 <main class="main">
   <section class="stage">
@@ -53,6 +63,7 @@
       <button data-tab="comments">Comments <span id="nComments" class="cnt"></span></button>
       <button data-tab="annots">Annotations <span id="nAnnots" class="cnt"></span></button>
       <button data-tab="labels">Labels</button>
+      <button data-tab="review" title="Disagreement hotspots, largest first (J next, Shift+J previous)">Review <span id="nReview" class="cnt"></span></button>
       <button data-tab="log">Log <span id="nOps" class="cnt"></span></button>
     </nav>
     <div class="tabbody">
@@ -60,6 +71,7 @@
       <div data-pane="comments" class="pane" id="commentsPane"></div>
       <div data-pane="annots" class="pane" id="annotsPane"></div>
       <div data-pane="labels" class="pane" id="labelsPane"></div>
+      <div data-pane="review" class="pane" id="reviewPane"></div>
       <div data-pane="log" class="pane" id="logPane"></div>
     </div>
   </aside>

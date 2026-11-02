@@ -51,34 +51,64 @@ so the app flags them.
 
 ## Using the app
 
-Five synced panels: the **slide** (bare) and **`<YourName>_labels`** on top, **Bill_eugene_code**,
-**Vestrum** and **Claude Code** below. `<YourName>_labels` is built from your selections: cells you have
-not picked or relabelled show faint (header switch: faint / as Bill_eugene_code / hidden) and are saved
-as Bill_eugene_code by default. The three method panels never change.
+Five synced panels: the **slide** (bare) and **`<YourName>_labels`** on top, **Bill_eugene_code**, **Vestrum**
+and **Claude Code** below. Every change goes to `<YourName>_labels`, whichever panel you work on; the three
+method panels never change. Cells you never touch are saved as Bill_eugene_code (`bill_eugene_code-default`).
 
-1. **Draw a region**: <kbd>Shift</kbd>+drag on any panel (or the Draw region tool, or right-click → Draw region here).
-2. **Pick the labels to start from**: the box next to the region lists Bill_eugene_code / Vestrum / Claude Code
-   with how much each already agrees with your layer. Or right-click inside the region on the panel that looks
-   right → *Use this panel's labels here*. The choice is logged; your layer's panel outlines it in that method's colour.
-3. **Fix on top**: relabel the region, or only the cells you have as one class; "+ new label…" creates a label.
+**Start, Restart, Clear (whole sections).** On an empty section the start card asks which labels to start
+from. *Apply to all sections not started yet* fills only sections without picks or relabels; sections you
+have worked on keep their work. **Restart from…** (layer header) overwrites the section in view, or all
+sections after a dialog that names how many already have work. **Clear** empties the section (or all) — picks
+and relabels go, comments and annotations stay, Undo brings it back, and the start card returns.
+**Reset to initial…** (Log tab, type your name) archives the whole session to `sessions/_archive/`.
 
-Whichever panel you draw on, every change goes to your layer. A region you never use disappears when you click
-elsewhere or press Esc. **Clear** drops the current selection; **Reset to initial…** (Log tab, type your name to
-confirm) archives the whole session to `sessions/_archive/` and starts again from Bill_eugene_code.
-
-Right-click menu, by what is under the pointer: region (use this panel's labels, relabel, comment, discard) ·
-comment (edit, delete) · annotation (rename, delete) · past edit (select again, undo this edit) · cell (show
-labels, relabel this cell, comment) · anywhere (draw region, comment, annotate here).
+**Select, then fix.** Select cells with any tool, then in the box by the selection either use one method's
+labels for them, or relabel — by default only the ticked classes (the dominant class is pre-ticked).
 
 | Key | Action |
 |---|---|
-| V / E / C / R / A | Pan · Draw region · Comment point · Comment area · Annotate |
-| Shift+drag | Draw a region from any tool |
-| D | Only cells where the three methods disagree |
-| Esc | Cancel drawing / back to Pan / clear selection |
-| Ctrl+Z | Undo the last edit (the Log tab undoes any single edit) |
+| V | Pan (Shift+drag lassos) |
+| L (or E) · P · R · B · S | Lasso · Polygon (click corners; double-click or Enter closes) · Rectangle · Brush · single Cell |
+| [ ] | Brush smaller / larger |
+| W · K · N · G | Assist: Wand · Compartment · Novae region · Refine border (below) |
+| Shift / Alt / Ctrl (⌘) + click or drag | add to / subtract from / (Assist tools) keep only inside the selection |
+| 1–9 · Enter | choose the new label (recent first) · apply the relabel |
+| Esc | close a menu, cancel a drawing, deselect, then back to Pan |
+| C · M · A | Comment point · Comment area · Annotate |
+| D | only cells where the methods disagree |
+| J / Shift+J | Review tab: next not-done / previous hotspot |
+| Ctrl+Z (⌘Z) | undo the last edit (the Log tab undoes any single edit) |
 
-Undoing an earlier edit does not recompute later ones: each edit keeps the cells it recorded when it was made.
+Right-click shows what is under the pointer: selection, comment, annotation, past edit (select again, undo),
+cell (show labels, relabel, comment). Undoing an earlier edit does not recompute later ones.
+
+### Assist tools (opt-in; each only makes a selection, you still confirm in the box)
+
+All work on a per-section cell graph (Delaunay on slide mm; the *max gap* slider, default 30 µm on a real
+slide, drops longer edges). Tools whose pack attribute is missing are hidden.
+
+- **Wand W**: click a cell → the connected cells with the same label in *that panel's* layer (the slide panel
+  and your layer use your labels). *Jump* crosses 0–2 cells of other labels.
+- **Compartment K**: the connected epithelium (PanCK) or immune (CD45) region of the clicked cell; per-section
+  Otsu threshold on log intensity, the sliders shift it. **Snap to compartment** (in the box) keeps the majority one.
+- **Novae N**: connected cells of the clicked cell's Novae domain (5 / 10 / 20 domains).
+- **Refine border G** (random walker): with a selection, place seeds — **click = inside, Alt+click = outside**
+  (here Alt does *not* subtract), or set the *inside / outside* toggle in the Assist row and just click.
+  Weights use PanCK/CD45, the label layer and the compartment. On real tissue it ties a plain PanCK threshold
+  (median accuracy 0.88 vs 0.88 at epithelium/stroma borders) rather than beating it: it is best for
+  mixed-label borders where the stains do not separate.
+- **What is this?** (in the box): compartment, Novae domain, how the methods label it. **Suggest** pre-sets the
+  label and ticks; it never applies.
+
+**Review tab.** Two queues of disagreement hotspots: *Any agent ≠ Bill* (one Bill → agent confusion in one
+Novae domain per item, adjacent cells only) and *Both agents agree, Bill differs* (1-cell gaps allowed).
+Items are 20–1,500 cells (bigger patches are cut into spatial pieces), ranked by expected fixes (a cell counts
+1 when both agents differ from Bill, ⅓ when one does). J jumps to the next item not done and selects it; an
+item is done when one edit covers half of it.
+
+**Efficiency log.** Each edit records how its selection was made: `tool`, `tools` (every tool that shaped it)
+and `sel_ms` (selection start → apply) in `ops.jsonl`; `summary.json` → `efficiency_by_tool` gives ops, cells,
+median ms and undone count per tool.
 
 ## Save → `packs/<pack>/results/<reviewer>_<time>/`
 
@@ -98,6 +128,7 @@ Undoing an earlier edit does not recompute later ones: each edit keeps the cells
 | `server/pack.py` | loads a pack; mm ↔ image-px transform; point-in-polygon in slide mm (shapely); binary cell payload |
 | `server/session.py` | per-reviewer state. **Append-only edit log**: corrected label = Bill_eugene_code, then each non-undone op in order (last wins). Geometry is stored in slide mm so work survives the image swap. Vocabulary with merges |
 | `server/app.py` | routes: tiles, `cells.bin`, `final.bin`, `/api/region` (stats), `/api/ops`, `/api/undo`, comments, annotations, vocab, save |
+| `server/assist.py` | assisted selection: cell graph (cached in `sessions/_cache/*.npz`), wand / compartment / Novae floods, random walker, review queue, efficiency summary |
 | `server/export.py` | results folder; the slide image is painted band by band and streamed to a pyramidal TIFF (memory ≈ one band) |
 | `web/app.js` | five OpenSeadragon viewers on one tile set, leader→follower sync, canvas overlays with a 256-px spatial grid index (only visible cells are drawn), freehand drawing, side panes |
 | `pack/build_pack.py`, `pack/make_standin.py`, `pack/make_demo_pack.py`, `pack/cells_io.py` | pack builder; stand-in image from cell positions only (never labels); synthetic demo pack; cell table I/O |

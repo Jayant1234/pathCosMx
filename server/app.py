@@ -1,6 +1,7 @@
 """PathQC Flask server: serves the viewer, the slide tiles, the cells, and the review API."""
 import sys
 import threading
+import time
 import traceback
 from collections import Counter
 from pathlib import Path
@@ -12,6 +13,7 @@ from flask import Flask, Response, abort, jsonify, request, send_from_directory
 from shapely.geometry import LineString, MultiPoint, Point, Polygon
 
 from . import export
+from .assist import COMP_NAMES, Assist, timed
 from .pack import SOURCE_KEYS, Pack
 from .session import Session, TAG_NAMES, slug
 
@@ -25,6 +27,7 @@ def create_app(pack_dir, results_dir=None, image_transform=None):
     sessions = {}
     section_cells = {s: np.nonzero(pack.sec == k)[0] for k, s in enumerate(pack.sections)}
     save_status = {}
+    assist = Assist(pack, sessions_root / "_cache")
     app = Flask(__name__, static_folder=None)
 
     def sess():
@@ -85,7 +88,7 @@ def create_app(pack_dir, results_dir=None, image_transform=None):
     def summarise_op(o):
         return {k: o.get(k) for k in ("id", "op", "source", "to", "to_name", "filter", "filter_name",
                                       "filter_ref", "filter_names", "scope", "sections",
-                                      "n", "ts", "reviewer")} | {"geometry": {"type": "Polygon",
+                                      "n", "ts", "reviewer", "tool")} | {"geometry": {"type": "Polygon",
                                                                               "px": pack.geom_mm_to_px(o["mm"])}}
 
     @app.route("/api/cells.bin")
@@ -152,7 +155,7 @@ def create_app(pack_dir, results_dir=None, image_transform=None):
         """Browser selection shapes (image px) -> stored shapes (mm) + one outline polygon for display."""
         a, b = pack.px_to_mm([0, 1], [0, 0])
         mm_per_px = float(np.hypot(a[1] - a[0], b[1] - b[0]))
-        out, add, sub = [], [], []
+        out, add, sub, assisted = [], [], [], False
         for g in geoms:
             mm = pack.geom_px_to_mm(g["px"])
             rec = {"mode": "sub" if g.get("mode") == "sub" else "add", "type": g["type"], "mm": mm}
@@ -161,6 +164,10 @@ def create_app(pack_dir, results_dir=None, image_transform=None):
                 shp = (LineString(mm) if len(mm) > 1 else Point(mm[0])).buffer(rec["r_mm"])
             elif g["type"] == "Point":
                 shp = Point(mm[0]).buffer(0.004)
+            elif g["type"] == "Assist":            # a wand / walker / queue pick: seed points only, outline from cells
+                rec["tool"] = str(g.get("tool", ""))[:24]
+                assisted = True
+                shp = None
             else:
                 shp = shapely.make_valid(Polygon(mm)) if len(mm) >= 3 else None
             out.append(rec)
@@ -169,8 +176,11 @@ def create_app(pack_dir, results_dir=None, image_transform=None):
         shape = shapely.union_all(add) if add else None
         if shape is not None and sub:
             shape = shape.difference(shapely.union_all(sub))
-        if shape is None or shape.is_empty or shape.geom_type != "Polygon":
-            shape = MultiPoint(np.column_stack([pack.x_mm[idx], pack.y_mm[idx]])).convex_hull.buffer(0.004)
+        if assisted or shape is None or shape.is_empty or shape.geom_type != "Polygon":
+            pts = MultiPoint(np.column_stack([pack.x_mm[idx], pack.y_mm[idx]]))
+            shape = (shapely.concave_hull(pts, ratio=0.15) if assisted and idx.size >= 4 else pts.convex_hull).buffer(0.004)
+            if shape.geom_type != "Polygon":
+                shape = pts.convex_hull.buffer(0.004)
         poly = shape.simplify(0.002).exterior.coords[:-1]
         return out, [[round(x, 6), round(y, 6)] for x, y in poly]
 
@@ -198,6 +208,11 @@ def create_app(pack_dir, results_dir=None, image_transform=None):
             poly_mm, idx = region_cells(s, body)
         names = {v["code"]: v["name"] for v in s.vocab}
         op = {"op": body["op"], "mm": poly_mm, "n": int(idx.size), **extra}
+        if body.get("tool"):                       # efficiency log: how the selection was made, and how long it took
+            op["tool"] = str(body["tool"])[:24]
+            op["tools"] = [str(t)[:24] for t in (body.get("tools") or [body["tool"]])][:12]
+        if body.get("sel_ms") is not None:
+            op["sel_ms"] = int(max(0, float(body["sel_ms"])))
         if "scope" not in op:                      # whole-section ops are resolved from their sections at replay
             op["cells"] = idx.tolist()
         if body.get("filter") is not None:
@@ -238,6 +253,123 @@ def create_app(pack_dir, results_dir=None, image_transform=None):
         dest = s.archive(sessions_root / "_archive")
         sessions.pop(slug(s.reviewer), None)
         return jsonify({"archived_to": str(dest)})
+
+    # ---------- assisted selection (returns cells; the browser previews them, nothing is applied here)
+    def layer_codes(s, layer):
+        """Root label code per cell of a panel's layer: 'corr' (the reviewer's) or a source key / index."""
+        root = s.resolve_table()
+        if layer in (None, "corr", "mine"):
+            a = s.replay(pack.src)[0]
+        else:
+            key = SOURCE_KEYS[int(layer)] if str(layer).isdigit() and int(layer) < len(SOURCE_KEYS) else layer
+            if key not in pack.src:
+                abort(400, "unknown layer")
+            a = pack.src[key]
+        return np.where(a == 255, -1, root[np.minimum(a, 255)]).astype(np.int64)
+
+    def num(body, k, default, lo, hi):
+        try:
+            return float(min(hi, max(lo, float(body.get(k, default)))))
+        except (TypeError, ValueError):
+            return default
+
+    def cell_list(v):
+        try:
+            a = np.asarray([int(i) for i in (v or [])], dtype=np.int64)
+        except (TypeError, ValueError):
+            abort(400, "cells must be a list of cell indices")
+        return a[(a >= 0) & (a < pack.n)]
+
+    @app.route("/api/assist/info")
+    def assist_info():
+        assist.graph()                             # built on first use (about a second on a real slide), then cached
+        return jsonify(assist.info())
+
+    @app.route("/api/assist/compartments.bin")
+    def assist_comp():
+        c = assist.compartments((num(request.args, "panck", 0, -5, 5), num(request.args, "cd45", 0, -5, 5)))
+        if c is None:
+            abort(404)
+        return Response(c.tobytes(), mimetype="application/octet-stream")
+
+    @app.route("/api/assist/domains.bin")
+    def assist_domains():
+        res = request.args.get("res")
+        if res not in assist.dom_codes:
+            abort(404)
+        return Response(assist.dom_codes[res].tobytes(), mimetype="application/octet-stream")
+
+    @app.route("/api/assist/flood", methods=["POST"])
+    def assist_flood():
+        s = sess()
+        body = request.get_json(silent=True) or {}
+        try:
+            seed = int(body["seed"])
+        except (KeyError, TypeError, ValueError):
+            abort(400, "seed must be a cell index")
+        if not 0 <= seed < pack.n:
+            abort(400, "seed is not a cell")
+        kind = body.get("kind", "wand")
+        t0 = time.perf_counter()
+        if kind == "wand":
+            classes = layer_codes(s, body.get("layer"))
+            names = {v["code"]: v["name"] for v in s.vocab}
+            label = names.get(int(classes[seed]), "not labelled")
+        elif kind == "compartment":
+            classes = assist.compartments((num(body, "panck", 0, -5, 5), num(body, "cd45", 0, -5, 5)))
+            if classes is None:
+                abort(400, "this pack has no PanCK / CD45 stains")
+            label = COMP_NAMES[int(classes[seed])]
+        elif kind == "novae":
+            res = body.get("res")
+            if res not in assist.dom_codes:
+                abort(400, "this pack has no Novae domains at that resolution")
+            classes = assist.dom_codes[res]
+            label = assist.dom_names[res][int(classes[seed])]
+        else:
+            abort(400, "kind must be wand, compartment or novae")
+        gap = num(body, "gap", assist.default_gap, 5, 60)
+        within = cell_list(body["within"]) if body.get("within") is not None else None
+        cells = assist.flood(classes, seed, gap, int(num(body, "jump", 0, 0, 2)), within)
+        return jsonify({"cells": cells.tolist(), "label": label, "kind": kind, "gap": gap,
+                        "ms": round(1000 * (time.perf_counter() - t0), 1)})
+
+    @app.route("/api/assist/walker", methods=["POST"])
+    def assist_walker():
+        s = sess()
+        body = request.get_json(silent=True) or {}
+        sel, ins, outs = cell_list(body.get("selection")), cell_list(body.get("inside")), cell_list(body.get("outside"))
+        if not ins.size or not outs.size:
+            abort(400, "place at least one inside and one outside seed")
+        labels = layer_codes(s, body.get("layer"))
+        cells, ms = timed(assist.walker, sel, ins.tolist(), outs.tolist(), labels,
+                          num(body, "gap", assist.default_gap, 5, 60), num(body, "beta", 2.0, 0.01, 50),
+                          shift=(num(body, "panck", 0, -5, 5), num(body, "cd45", 0, -5, 5)))
+        return jsonify({"cells": np.unique(cells).tolist(), "ms": ms})
+
+    def queue_state(s, kind):
+        q = assist.queue("both" if kind == "both" else "any", s.resolve_table()[:256].astype(np.int64))
+        return q, assist.queue_done(q, s.active_ops(), s.op_cells)
+
+    @app.route("/api/assist/queue")
+    def assist_queue():
+        s = sess()
+        kind = request.args.get("kind", "any")
+        if kind not in ("any", "both"):
+            abort(400, "kind must be any or both")
+        (q, done), ms = timed(queue_state, s, kind)
+        items = [{k: it[k] for k in ("id", "section", "n", "score", "both_pct", "domain", "confusion", "bbox_px")} | {"done": bool(d)}
+                 for it, d in zip(q["items"], done)]
+        return jsonify({"kind": kind, "items": items, "n_done": int(done.sum()), "ms": ms})
+
+    @app.route("/api/assist/queue/<kind>/<int:item>")
+    def assist_queue_item(kind, item):
+        if kind not in ("any", "both"):
+            abort(404)
+        q, _ = queue_state(sess(), kind)
+        if not 0 <= item < len(q["items"]):
+            abort(404)
+        return jsonify({"cells": q["items"][item]["cells"].tolist()})
 
     # ---------- comments, annotations, vocabulary
     def item_routes(kind):

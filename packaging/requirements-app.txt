@@ -1,8 +1,9 @@
-# what the desktop app bundles (registration tools on our side also need opencv-python-headless, scipy)
+# what the desktop app bundles (registration tools on our side also need opencv-python-headless)
 flask>=3.0
 numpy>=1.26
 pandas>=2.1
 shapely>=2.0
+scipy>=1.11
 pillow>=10.1
 pyvips>=2.2
 pyvips-binary>=8.16

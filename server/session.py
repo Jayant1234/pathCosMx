@@ -174,7 +174,8 @@ class Session:
                 return None
             target = act[-1]
             self._append_op({"op": "undo", "target": target["id"], "id": uuid.uuid4().hex[:10],
-                             "reviewer": self.reviewer, "ts": now()})
+                             "reviewer": self.reviewer, "ts": now(),
+                             **({"tool": target["tool"]} if target.get("tool") else {})})
             return target
 
     def archive(self, archive_root: Path):

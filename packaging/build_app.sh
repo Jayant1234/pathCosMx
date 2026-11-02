@@ -11,7 +11,7 @@ python -m PyInstaller --noconfirm --clean --windowed --name PathQC \
   --hidden-import _libvips \
   --collect-submodules server \
   --collect-submodules pack \
-  --exclude-module scipy --exclude-module pyarrow --exclude-module cv2 --exclude-module matplotlib --exclude-module tkinter --exclude-module IPython \
+  --exclude-module pyarrow --exclude-module cv2 --exclude-module matplotlib --exclude-module tkinter --exclude-module IPython \
   --osx-bundle-identifier org.pathcosmx.pathqc \
   run.py
 echo "built:"; ls dist

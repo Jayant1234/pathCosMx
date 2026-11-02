@@ -25,6 +25,9 @@ const S = {
   ref: 'corr', ticked: new Set(), target: null, recent: [],
   hidden: new Set(), disagree: false, showOps: true, dot: 1, wash: 0.55, layerAlpha: 0.9, untouched: 'faint',
   sel: null, syncing: false, secBoxes: [], secTouched: [], secView: 0,
+  // assisted selection: pack attributes, tool settings, walker seeds, review queue, efficiency log
+  assist: null, gap: 30, jump: 0, compShift: [0, 0], novaeRes: null, comp: null, dom: {}, walk: null, queue: null,
+  selTool: null, selTools: [], selT0: 0, gestT0: 0, suggested: null, busy: false,
 };
 const layerName = () => `${S.reviewer.replace(/[^A-Za-z0-9_.-]+/g, '_')}_labels`;
 const sourceName = k => S.manifest.sources.find(s => s.key === k)?.name ?? k;
@@ -68,6 +71,8 @@ async function load() {
   if (!S.cells) await loadCells();
   await loadFinal();
   if (!S.panels.length) buildPanels();
+  if (!S.assist) loadAssist().catch(fail);
+  S.queue = null;
   S.panels.find(P => P.mine).titleEl.textContent = layerName();
   deselect();
   renderAll();
@@ -182,20 +187,31 @@ function renderStartCard() {
   card.innerHTML = `<div class="sc-h">Start <b>${esc(layerName())}</b> for <b>${esc(b.name)}</b> — pick the labels to start from:</div>
     <div class="sc-b">${S.manifest.sources.map(s => `<button class="btn base" data-start="${s.key}" style="--bc:${BASECOL[s.key]}"><span><i class="dot"></i>${esc(s.name)}</span></button>`).join('')}</div>
     ${b.dev ? `<div class="warnbox">${esc(b.name)} is a dev section: Vestrum is in-sample here.</div>` : ''}
-    <label class="sc-all"><input type="checkbox" id="startAll"> apply to all sections</label>`;
-  card.querySelectorAll('[data-start]').forEach(x => x.onclick = () => sectionOp('base', x.dataset.start, $('#startAll').checked));
+    <label class="sc-all" title="Sections you have already worked on keep their work (Restart from… overwrites)"><input type="checkbox" id="startAll"> apply to all sections not started yet</label>`;
+  card.querySelectorAll('[data-start]').forEach(x => x.onclick = () => { card.hidden = true; sectionOp('base', x.dataset.start, $('#startAll').checked ? 'untouched' : false); });
 }
 
+// all: true = every section, 'untouched' = sections with no picks / relabels yet, false = the section in view
 function sectionOp(op, source, all) {
-  const secs = all ? S.manifest.sections : [S.secBoxes[S.secView].name];
-  return applyOp({ op, source, sections: secs }, true);
+  const secs = all === 'untouched' ? S.secBoxes.filter((b, k) => !S.secTouched[k] || k === S.secView).map(b => b.name)
+    : all ? S.manifest.sections : [S.secBoxes[S.secView].name];
+  return applyOp({ op, source, sections: secs, tool: 'section' }, true);
 }
 function restartItems() {
   const name = S.secBoxes[S.secView = sectionInView()].name, items = [{ sep: true, title: `Restart ${name} from` }];
   for (const s of S.manifest.sources) items.push({ label: `${s.name} labels`, fn: () => sectionOp('base', s.key, false), cls: 'strong' });
   items.push({ sep: true, title: 'All sections from' });
-  for (const s of S.manifest.sources) items.push({ label: `${s.name} labels (all sections)`, fn: () => sectionOp('base', s.key, true) });
+  for (const s of S.manifest.sources) items.push({ label: `${s.name} labels (all sections)`, fn: () => restartAll(s.key) });
   return items;
+}
+function restartAll(source) {      // overwrites every section: say how many already have work first
+  const worked = S.secBoxes.filter((b, k) => S.secTouched[k]).map(b => b.name), n = S.secBoxes.length;
+  if (!worked.length) return sectionOp('base', source, true);
+  dialog(`<h3>Restart all ${n} sections from ${esc(sourceName(source))}?</h3>
+    <p class="hint"><b>${worked.length} of ${n} sections</b> already have work in ${esc(layerName())}: ${esc(worked.join(', '))}.
+      Every pick and relabel there is replaced by ${esc(sourceName(source))} labels. Comments and annotations stay; Undo (Ctrl+Z) brings the work back.</p>
+    <div class="acts"><button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn danger" id="restartAllOk">Overwrite ${worked.length} worked section${worked.length > 1 ? 's' : ''}</button></div>`,
+  async () => { await sectionOp('base', source, true); });
 }
 function clearItems() {
   const name = S.secBoxes[S.secView = sectionInView()].name;
@@ -278,6 +294,9 @@ function drawSelection(P, ctx, m, W, H) {
   if (P.layer == null || r >= 4) ring(S.selList, P.layer == null ? '#1f6fd1' : 'rgba(31,111,209,.7)');
   const d = S.draw;
   if (d && d.kind === 'brush') ring(d.cells, d.sel === 'sub' ? '#e5484d' : '#1f6fd1');
+  if (S.walk) for (const [list, col] of [[S.walk.inside, '#1e9e57'], [S.walk.outside, '#e5484d']]) for (const i of list) {
+    const [x, y] = m.toS(px[i], py[i]); ctx.beginPath(); ctx.arc(x, y, 6, 0, 6.2832); ctx.fillStyle = col; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = '#fff'; ctx.stroke();
+  }
   for (const g of S.selGeoms) {
     ctx.strokeStyle = g.mode === 'sub' ? '#e5484d' : '#1f6fd1';
     if (g.type === 'Brush') { ctx.save(); ctx.globalAlpha = 0.13; ctx.lineCap = ctx.lineJoin = 'round'; ctx.lineWidth = 2 * g.r_px * m.s; path(ctx, m, g.px, false); if (g.px.length === 1) ctx.lineTo(...m.toS(g.px[0][0] + 0.01, g.px[0][1])); ctx.stroke(); ctx.restore(); continue; }
@@ -431,9 +450,14 @@ function hits(P, sx, sy) {      // everything under a screen point of one panel
 
 // ---------------------------------------------------------------- tools, drawing, clicks
 const SEL_TOOLS = ['lasso', 'poly', 'rect', 'brush', 'cell'];
+const ASSIST_TOOLS = { wand: 'wand', comp: 'compartment', novae: 'novae' };
 function setMode(mode, oneShot = false) {
+  if (mode === 'walker' && !S.selList.length) { toast('Refine border: select a region first (any tool), then press G and click inside / Alt+click outside.', 5000); return; }
+  if (mode === 'walker' && S.mode !== 'walker') S.walk = { base: S.selList.slice(), tools: [...S.selTools], t0: S.selT0, inside: [], outside: [], P: S.panels[S.selPanel] };
+  if (mode !== 'walker') S.walk = null;
   S.mode = mode; S.oneShot = oneShot; S.draw = null; if (mode !== 'brush') S.hover = null;
-  document.querySelectorAll('#modes button, #modes2 button').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
+  document.querySelectorAll('#modes button, #modes2 button, #modes3 button').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
+  renderAssistBar(); if (S.selInfo && !$('#pop').hidden) renderPopover();
   S.panels.forEach(P => P.el.classList.toggle('drawing', mode !== 'pan'));
   redraw();
 }
@@ -451,12 +475,15 @@ function attachPointer(P) {
     e.stopPropagation(); e.preventDefault();
     const [sx, sy] = pos(e), m = mapping(P), pt = m.toI(sx, sy);
     const sel = e.altKey ? 'sub' : e.shiftKey ? 'add' : 'replace';
+    if (!S.draw) S.gestT0 = performance.now();
     if (tool === 'pin') { finishDrawing('pin', P, { type: 'Point', px: [pt] }); return; }
     if (tool === 'cell') {
       const c = nearestCell(pt[0], pt[1], 10 / m.s);
       if (c == null) { if (sel === 'replace') deselect(); return; }
-      applySel(sel, [c], { type: 'Point', px: [[S.cells.px[c], S.cells.py[c]]] }, P); return;
+      applySel(sel, [c], { type: 'Point', px: [[S.cells.px[c], S.cells.py[c]]] }, P, 'cell'); return;
     }
+    if (ASSIST_TOOLS[tool]) { assistClick(P, ASSIST_TOOLS[tool], nearestCell(pt[0], pt[1], 10 / m.s), (e.ctrlKey || e.metaKey) && S.selList.length ? 'and' : sel); return; }
+    if (tool === 'walker') { walkerClick(P, nearestCell(pt[0], pt[1], 10 / m.s), e.altKey !== !!S.walk?.out); return; }
     if (tool === 'poly') {
       const d = S.draw, t = performance.now();
       if (d && d.kind === 'poly' && d.P === P) {
@@ -488,7 +515,7 @@ function attachPointer(P) {
   P.el.addEventListener('pointerup', e => {
     const d = S.draw; if (!d || d.P !== P || d.kind === 'poly') return;
     e.stopPropagation(); S.draw = null;
-    if (d.kind === 'brush') { applySel(d.sel, d.cells, { type: 'Brush', px: simplify(d.pts), r_px: Math.round(d.r * 10) / 10 }, P); if (S.oneShot) setMode('pan'); return; }
+    if (d.kind === 'brush') { applySel(d.sel, d.cells, { type: 'Brush', px: simplify(d.pts), r_px: Math.round(d.r * 10) / 10 }, P, 'brush'); if (S.oneShot) setMode('pan'); return; }
     if (d.kind === 'rect') {
       const m = mapping(P);
       if (!d.b || Math.abs(d.b[0] - d.pts[0][0]) * m.s < 4 || Math.abs(d.b[1] - d.pts[0][1]) * m.s < 4) { redraw(); toast('Drag to draw a rectangle.'); return; }
@@ -501,6 +528,7 @@ function attachPointer(P) {
   P.el.addEventListener('dblclick', e => { if (S.mode !== 'pan') { e.stopPropagation(); e.preventDefault(); } }, true);
   P.el.addEventListener('contextmenu', e => {
     if (e.target.closest('.ph')) return;
+    if (e.ctrlKey && ASSIST_TOOLS[S.mode]) { e.preventDefault(); return; }   // macOS: Ctrl+click is the "inside the selection" modifier here
     e.preventDefault(); e.stopPropagation();
     const [sx, sy] = pos(e); contextMenu(P, hits(P, sx, sy), e.clientX, e.clientY);
   }, true);
@@ -523,7 +551,7 @@ function simplify(pts) {
 function finishDrawing(kind, P, geom, sel = 'replace') {
   if (kind === 'pin' || kind === 'area') commentDialog({ geometry: geom });
   else if (kind === 'annot') annotationDialog({ geometry: geom });
-  else selectPolygon(geom.px, P, sel);
+  else selectPolygon(geom.px, P, sel, kind);
   if (S.oneShot) setMode('pan');
   redraw();
 }
@@ -557,15 +585,17 @@ function showCell(c) {
 }
 
 // ---------------------------------------------------------------- selection: a set of cells, Shift adds, Alt subtracts
-function selectPolygon(px, P, sel = 'replace') {
+function selectPolygon(px, P, sel = 'replace', tool = 'lasso') {
   const cells = cellsInPoly(px);
   if (!cells.length && sel !== 'sub') toast('No cells inside that shape.');
-  applySel(sel, cells, { type: 'Polygon', px }, P);
+  applySel(sel, cells, { type: 'Polygon', px }, P, tool);
 }
-function applySel(sel, cells, geom, P) {
-  if (sel === 'replace') { S.mask.fill(0); S.selGeoms = []; S.selUsed = false; }
-  const v = sel === 'sub' ? 0 : 1;
-  for (const i of cells) S.mask[i] = v;
+// sel: 'replace' | 'add' (Shift) | 'sub' (Alt) | 'and' (keep only these cells); tool feeds the efficiency log
+function applySel(sel, cells, geom, P, tool = 'other') {
+  if (sel === 'replace') { S.mask.fill(0); S.selGeoms = []; S.selUsed = false; S.selTool = tool; S.selTools = [tool]; S.selT0 = S.gestT0 || performance.now(); S.suggested = null; }
+  else if (!S.selTools.includes(tool)) S.selTools.push(tool);
+  if (sel === 'and') { const keep = new Uint8Array(S.mask.length); for (const i of cells) keep[i] = 1; for (const i of S.selList) if (!keep[i]) S.mask[i] = 0; }
+  else { const v = sel === 'sub' ? 0 : 1; for (const i of cells) S.mask[i] = v; }
   if (geom) S.selGeoms.push({ ...geom, mode: sel === 'sub' ? 'sub' : 'add' });
   let n = 0; for (let i = 0; i < S.mask.length; i++) n += S.mask[i];
   if (!n) { deselect(); return; }
@@ -576,6 +606,7 @@ function applySel(sel, cells, geom, P) {
   selInfo(); resetTicks(); showTab('edit'); renderPopover(); renderEdit(); redraw();
 }
 function deselect() {
+  if (S.walk) setMode('pan');
   if (S.mask) S.mask.fill(0);
   S.selList = new Int32Array(0); S.selGeoms = []; S.selInfo = null; S.selUsed = false; S.sel = null; S.draw = null;
   $('#cellBox').hidden = true; $('#pop').hidden = true; closeMenu(); renderEdit(); redraw();
@@ -598,7 +629,8 @@ function tickedCells() {
   for (const i of S.selList) if (S.ticked.has(rootOf(a[i]))) out.push(i);
   return out;
 }
-const selGeomsOut = () => S.selGeoms.map(g => ({ mode: g.mode, type: g.type, px: g.px, r_px: g.r_px }));
+const selGeomsOut = () => S.selGeoms.map(g => ({ mode: g.mode, type: g.type, px: g.px, r_px: g.r_px, tool: g.tool }));
+const effLog = () => ({ tool: S.selTool || 'other', tools: S.selTools.length ? S.selTools : [S.selTool || 'other'], sel_ms: Math.round(performance.now() - (S.selT0 || performance.now())) });
 const selOutline = () => S.selGeoms.length === 1 && S.selGeoms[0].type === 'Polygon' ? S.selGeoms[0].px : hull(S.selList);
 function quickList() {      // labels on the number keys: recent targets first, then the vocabulary order
   const roots = S.vocab.filter(v => v.merged_into == null).map(v => v.code);
@@ -614,6 +646,7 @@ function renderPopover() {
   pop.innerHTML = `<div class="ph2"><b>${nCells(info.n)}</b> <span>${info.sections.join(', ')}</span>
       <button class="x" data-a="discard" title="Deselect (Esc)">×</button></div>
     <div class="compline" id="selComp">${fmt(info.n)} cells: ${SRC.map(dom).join(' · ')}</div>
+    ${guessHtml()}
     ${devSecs.length ? `<div class="warnbox">Dev section ${devSecs.join(', ')}: Vestrum is in-sample here.</div>` : ''}
     <div class="lbl">Use labels from <span class="hint">→ ${esc(layerName())}</span></div>
     <div class="basebtns">${S.manifest.sources.map(s => `<button class="btn base" data-base="${s.key}" style="--bc:${BASECOL[s.key]}">
@@ -622,7 +655,7 @@ function renderPopover() {
     <div class="classes">${classes.map(([c, n]) => `<label><input type="checkbox" data-c="${c}" ${S.ticked.has(c) ? 'checked' : ''}><span class="sw" style="background:${c === 255 ? '#b9bec5' : S.colour[c]}"></span>${esc(nameOf(c))} <span class="mono">${fmt(n)}</span></label>`).join('')}</div>
     <div class="row"><select data-a="to"><option value="">new label…</option>${labelOptions(S.target)}</select><button class="btn primary" data-a="relabel" ${nTick ? '' : 'disabled'}>Relabel ${fmt(nTick)}</button></div>
     <div class="quick">${quick.map((c, k) => `<button class="qk ${S.target === c ? 'on' : ''}" data-q="${c}" title="Press ${k + 1}"><kbd>${k + 1}</kbd>${esc(nameOf(c))}</button>`).join('')}</div>
-    <div class="row"><button class="btn small" data-a="comment">Comment here</button><span class="hint" style="margin:0">Enter relabels · Esc deselects · Shift adds · Alt subtracts</span></div>`;
+    <div class="row"><button class="btn small" data-a="comment">Comment here</button><span class="hint" style="margin:0">Enter relabels · Esc deselects · ${S.walk ? '<b>Refine: click = inside seed, Alt+click = outside seed</b>' : 'Shift adds · Alt subtracts'}</span></div>`;
   pop.hidden = false;
   pop.querySelectorAll('[data-base]').forEach(b => b.onclick = () => baseSel(b.dataset.base));
   pop.querySelector('[data-a=ref]').onchange = e => { S.ref = e.target.value; resetTicks(); renderPopover(); };
@@ -632,6 +665,8 @@ function renderPopover() {
   pop.querySelector('[data-a=relabel]').onclick = relabelSel;
   pop.querySelector('[data-a=comment]').onclick = () => commentDialog({ geometry: { type: 'Polygon', px: selOutline() } });
   pop.querySelector('[data-a=discard]').onclick = deselect;
+  pop.querySelector('[data-a=suggest]')?.addEventListener('click', suggest);
+  pop.querySelector('[data-a=snap]')?.addEventListener('click', snapCompartment);
   placePopover();
 }
 
@@ -658,7 +693,7 @@ async function ensureLabel(code) {      // "+ new label…" creates it first
   setVocab(r.vocab); renderAll(); return codeOfName(n.trim());
 }
 
-function baseSel(source) { return applyOp({ op: 'base', source, cells: Array.from(S.selList), geoms: selGeomsOut() }); }
+function baseSel(source) { return applyOp({ op: 'base', source, cells: Array.from(S.selList), geoms: selGeomsOut(), ...effLog() }); }
 async function relabelSel() {
   if (!S.selList.length) return;
   if (S.target == null) { toast('Choose the new label first (number keys 1–9 or the list).'); return; }
@@ -667,7 +702,8 @@ async function relabelSel() {
   try {
     const to = await ensureLabel(S.target); if (to == null) return;
     S.target = to; S.recent = [to, ...S.recent.filter(c => c !== to)].slice(0, 4);
-    await applyOp({ op: 'relabel', to, cells, geoms: selGeomsOut(), filter_ref: S.ref, filter_classes: [...S.ticked] });
+    const eff = effLog(); if (S.suggested === to) eff.tools = [...eff.tools, 'suggest'];
+    await applyOp({ op: 'relabel', to, cells, geoms: selGeomsOut(), filter_ref: S.ref, filter_classes: [...S.ticked], ...eff });
   } catch (e) { fail(e); }
 }
 
@@ -681,6 +717,8 @@ function renderEdit() {
           Brush <kbd>B</kbd> (<kbd>[</kbd> <kbd>]</kbd> size), Cell <kbd>S</kbd>. <kbd>Shift</kbd> adds, <kbd>Alt</kbd> subtracts. In Pan <kbd>V</kbd>, <kbd>Shift</kbd>+drag lassos.</li>
         <li><b>Fix:</b> in the box by the selection, use another method's labels for those cells, or relabel only the ticked classes.
           <kbd>1</kbd>–<kbd>9</kbd> choose the new label, <kbd>Enter</kbd> applies, <kbd>Esc</kbd> deselects.</li>
+        <li><b>Assist (optional):</b> Wand <kbd>W</kbd> (same label, connected), Compartment <kbd>K</kbd>, Novae <kbd>N</kbd>, Refine border <kbd>G</kbd>;
+          the <b>Review</b> tab lists disagreement hotspots (<kbd>J</kbd> next, <kbd>Shift</kbd>+<kbd>J</kbd> previous). They only select — you still confirm.</li>
       </ol>
       <p class="hint">Every choice lands in <b>${esc(layerName())}</b>, whichever panel you drew on. Outlines there show the method you picked:
         ${S.manifest.sources.map(s => `<span class="keychip" style="--bc:${BASECOL[s.key]}">${esc(s.name)}</span>`).join(' ')} <span class="keychip" style="--bc:${BASECOL.relabel}">relabel</span></p>
@@ -702,7 +740,7 @@ async function applyOp(body, scoped = false) {
   applyOp.busy = true;
   try {
     const op = await api('/api/ops', { body });
-    S.ops.push(op); await loadFinal();
+    S.ops.push(op); await loadFinal(); if (S.queue) loadQueue(S.queue.kind);
     const where = op.scope === 'all' ? 'all sections' : (op.sections || []).join(', ');
     toast(op.op === 'clear' ? `${layerName()} cleared for ${where} — Undo (Ctrl+Z) brings it back`
       : op.op === 'base' ? `${layerName()}: ${sourceName(op.source)} labels for ${scoped ? where : nCells(op.n)}`
@@ -719,7 +757,7 @@ async function undo(target) {
   try {
     const r = await api('/api/undo', { body: target ? { target } : {} });
     if (!r.undone) { toast('Nothing to undo'); return; }
-    S.ops = S.ops.filter(o => o.id !== r.undone.id); await loadFinal();
+    S.ops = S.ops.filter(o => o.id !== r.undone.id); await loadFinal(); if (S.queue) loadQueue(S.queue.kind);
     toast('Undid: ' + opText(r.undone)); if (S.selList.length) selInfo(); renderAll();
   } catch (e) { fail(e); }
 }
@@ -729,6 +767,201 @@ const opText = o => {
   if (o.op === 'base') return `${sourceName(o.source)} labels · ${o.scope ? where : nCells(o.n)}`;
   return `relabel → ${o.to_name} · ${nCells(o.n)}`;
 };
+
+// ---------------------------------------------------------------- assisted selection (opt-in; every result is only a selection)
+async function loadAssist() {
+  const info = await api('/api/assist/info');
+  S.assist = info; S.gap = info.default_gap;
+  const res = Object.keys(info.domains);
+  S.novaeRes = res.includes('novae10') ? 'novae10' : res[0] || null;
+  await Promise.all([info.stains ? loadComp() : null, S.novaeRes ? loadDomains(S.novaeRes) : null]);
+  buildAssistBar(); if (S.selInfo) renderPopover();
+}
+async function loadComp() { S.comp = new Uint8Array(await api(`/api/assist/compartments.bin?panck=${S.compShift[0]}&cd45=${S.compShift[1]}`)); }
+async function loadDomains(res) { if (!S.dom[res]) S.dom[res] = new Uint16Array(await api('/api/assist/domains.bin?res=' + res)); }
+
+function buildAssistBar() {
+  const A = S.assist, bar = $('#abOpts'), seg = $('#modes3');
+  seg.hidden = false; $('#assistBar').hidden = false;
+  seg.querySelector('[data-mode=comp]').hidden = !A.stains;
+  seg.querySelector('[data-mode=novae]').hidden = !S.novaeRes;
+  bar.innerHTML = `<span class="ab-t" id="abTitle"></span>
+    <label class="ctl" data-for="wand comp novae walker" title="Longest cell-to-cell step (µm) the region may cross">max gap <input type="range" id="abGap" min="${A.gap_range[0]}" max="${A.gap_range[1]}" step="5" value="${S.gap}"> <b class="mono" id="abGapV">${S.gap} µm</b></label>
+    <label class="ctl" data-for="wand comp novae" title="Cross up to this many cells of another class">jump <select id="abJump"><option value="0">0 cells</option><option value="1">1 cell</option><option value="2">2 cells</option></select></label>
+    ${A.stains ? `<label class="ctl" data-for="comp" title="Epithelial: PanCK above the threshold (Otsu per section on log intensity)">PanCK <input type="range" id="abP" min="-1.5" max="1.5" step="0.05" value="0"> <b class="mono" id="abPV"></b></label>
+    <label class="ctl" data-for="comp" title="Immune: CD45 above the threshold (and PanCK below)">CD45 <input type="range" id="abC" min="-1.5" max="1.5" step="0.05" value="0"> <b class="mono" id="abCV"></b></label>` : ''}
+    ${S.novaeRes ? `<label class="ctl" data-for="novae">resolution <select id="abRes">${Object.keys(A.domains).map(k => `<option value="${k}" ${k === S.novaeRes ? 'selected' : ''}>${esc(A.domains[k].title)}</option>`).join('')}</select></label>` : ''}
+    <span class="hint" data-for="wand comp novae">click a cell · Shift adds · Alt subtracts · Ctrl/⌘ stays inside the selection</span>
+    <span class="hint" data-for="walker" id="abWalk"></span>`;
+  $('#abGap').oninput = e => { S.gap = +e.target.value; $('#abGapV').textContent = S.gap + ' µm'; };
+  $('#abJump').onchange = e => { S.jump = +e.target.value; e.target.blur(); };
+  if (A.stains) {
+    const upd = () => { S.compShift = [+$('#abP').value, +$('#abC').value]; renderAssistBar(); clearTimeout(upd.h); upd.h = setTimeout(() => loadComp().then(() => { if (S.selInfo) renderPopover(); }).catch(fail), 150); };
+    $('#abP').oninput = upd; $('#abC').oninput = upd;
+  }
+  if (S.novaeRes) $('#abRes').onchange = e => { S.novaeRes = e.target.value; e.target.blur(); loadDomains(S.novaeRes).then(() => { if (S.selInfo) renderPopover(); }).catch(fail); };
+  renderAssistBar();
+}
+function renderAssistBar() {
+  const bar = $('#abOpts'); if (!bar || !S.assist) return;
+  bar.querySelectorAll('[data-for]').forEach(x => x.hidden = !x.dataset.for.split(' ').includes(S.mode));
+  $('#abTitle').textContent = { wand: 'same label, connected:', comp: 'epithelium or immune region:', novae: 'same Novae domain, connected:', walker: 'random walker on the selection:' }[S.mode]
+    || 'optional helpers — each one only makes a selection; you confirm in the box';
+  if (S.assist.stains) {
+    const t = S.assist.thresholds[S.secBoxes[sectionInView()].name], k = v => v >= 1000 ? (v / 1000).toFixed(1) + 'k' : Math.round(v);
+    $('#abPV').textContent = '≥ ' + k(Math.expm1(t.panck_log + S.compShift[0]));
+    $('#abCV').textContent = '≥ ' + k(Math.expm1(t.cd45_log + S.compShift[1]));
+  }
+  if (S.walk) {      // Alt here places an outside seed (it does not subtract); the toggle does the same without Alt
+    const o = S.walk.out;
+    $('#abWalk').innerHTML = `next click places <span class="seg mini" id="abSide"><button data-side="in" class="${o ? '' : 'on'}" style="color:#1e9e57">● inside</button><button data-side="out" class="${o ? 'on' : ''}" style="color:#e5484d">● outside</button></span>
+      seed (Alt+click: ${o ? 'inside' : 'outside'}) · seeds <b style="color:#1e9e57">${S.walk.inside.length} in</b> / <b style="color:#e5484d">${S.walk.outside.length} out</b>
+      <button class="btn small" id="abWalkClear">Clear seeds</button>`;
+    $('#abSide').querySelectorAll('button').forEach(b => b.onclick = () => { S.walk.out = b.dataset.side === 'out'; renderAssistBar(); });
+  }
+  $('#abWalkClear')?.addEventListener('click', () => { const w = S.walk; w.inside = []; w.outside = []; S.gestT0 = w.t0; applySel('replace', Array.from(w.base), null, w.P, w.tools[0] || 'other'); S.selTools = [...w.tools]; S.walk = w; renderAssistBar(); });
+}
+
+const panelLayer = P => P.layer == null ? 'corr' : P.layer;
+async function assistClick(P, kind, cell, sel) {
+  if (cell == null) { if (sel === 'replace') deselect(); return; }
+  const body = { kind, seed: cell, layer: panelLayer(P), gap: S.gap, jump: S.jump, res: S.novaeRes, panck: S.compShift[0], cd45: S.compShift[1] };
+  if (sel === 'and') body.within = Array.from(S.selList);
+  S.busy = true;
+  try {
+    const r = await api('/api/assist/flood', { body });
+    const tool = { wand: 'wand', compartment: 'compartment', novae: 'novae' }[kind];
+    applySel(sel, r.cells, { type: 'Assist', tool, px: [[S.cells.px[cell], S.cells.py[cell]]] }, P, tool);
+    const where = kind === 'wand' ? ` (${P.layer == null || P.layer === 'corr' ? 'yours' : shortName(SRC[P.layer])})` : '';
+    toast(`${tool}: ${nCells(r.cells.length)} · ${r.label}${where} · ${r.ms} ms`);
+  } catch (e) { fail(e); } finally { S.busy = false; }
+}
+
+async function walkerClick(P, cell, outside) {
+  const w = S.walk; if (!w || cell == null) return;
+  (outside ? w.outside : w.inside).push(cell);
+  renderAssistBar(); redraw();
+  if (!w.inside.length || !w.outside.length) { toast(outside ? 'Outside seed placed. Now place an inside seed.' : 'Inside seed placed. Now Alt+click (or switch the toggle to “outside” and click) a cell outside the region.', 4000); return; }
+  S.busy = true;
+  try {
+    const r = await api('/api/assist/walker', { body: { selection: Array.from(w.base), inside: w.inside, outside: w.outside, layer: panelLayer(w.P), gap: S.gap, panck: S.compShift[0], cd45: S.compShift[1] } });
+    const seeds = [...w.inside, ...w.outside].map(i => [S.cells.px[i], S.cells.py[i]]);
+    applySel('replace', r.cells, { type: 'Assist', tool: 'walker', px: seeds }, w.P, 'walker');
+    S.walk = w; S.selT0 = w.t0; S.selTools = [...w.tools.filter(t => t !== 'walker'), 'walker'];
+    renderAssistBar(); redraw();
+    toast(`Refined: ${nCells(r.cells.length)} (from ${fmt(w.base.length)}) · ${r.ms} ms`);
+  } catch (e) { fail(e); } finally { S.busy = false; }
+}
+
+function majority(arr, list) {
+  const c = new Map(); for (const i of list) c.set(arr[i], (c.get(arr[i]) || 0) + 1);
+  let best = null, bn = -1; for (const [k, n] of c) if (n > bn) { best = k; bn = n; }
+  return [best, Math.round(100 * bn / Math.max(1, list.length))];
+}
+function guess() {      // "What is this?": compartment, Novae domain, and how the methods label it
+  const info = S.selInfo; if (!info) return null;
+  const top = k => info.comp[k][0] || [255, 0], pc = n => Math.round(100 * n / info.n);
+  const parts = [];
+  if (S.comp) { const [c, p] = majority(S.comp, S.selList); parts.push(`${{ epithelial: 'Epithelial', immune: 'Immune-rich', stromal: 'Stromal' }[S.assist.compartments[c]]} ${p}%`); }
+  const dom = S.novaeRes && S.dom[S.novaeRes];
+  if (dom) { const [d, p] = majority(dom, S.selList); parts.push(`Novae ${esc(S.assist.domains[S.novaeRes].names[d])} ${p}%`); }
+  const [v, c, b, y] = [top('vestrum'), top('claude_code'), top('bill_eugene_code'), top('corr')];
+  const nm = t => `${esc(nameOf(t[0]))} ${pc(t[1])}%`;
+  if (v[0] === c[0] && c[0] === b[0]) parts.push(`all agree: ${esc(nameOf(v[0]))} (V ${pc(v[1])}% · C ${pc(c[1])}% · Bill ${pc(b[1])}%)`);
+  else if (v[0] === c[0] && v[0] !== 255) parts.push(`agents agree: ${esc(nameOf(v[0]))} (V ${pc(v[1])}% · C ${pc(c[1])}%) vs Bill ${nm(b)}`);
+  else if (v[0] === b[0] || c[0] === b[0]) { const [lone, ln, other] = v[0] === b[0] ? [c, 'Claude', 'Vestrum'] : [v, 'Vestrum', 'Claude']; parts.push(`only ${ln} differs: ${nm(lone)} vs Bill + ${other} ${nm(b)}`); }
+  else parts.push(`agents split: Vestrum ${nm(v)} / Claude ${nm(c)} / Bill ${nm(b)}`);
+  if (y[0] !== (v[0] === c[0] ? v[0] : b[0])) parts.push(`yours ${nm(y)}`);
+  // suggestion: the agents' shared majority when it differs from yours, else the commonest label over the three methods
+  let target = null, why = '';
+  if (v[0] === c[0] && v[0] !== 255 && v[0] !== y[0]) { target = v[0]; why = `both agents call it ${nameOf(v[0])}`; }
+  else {
+    const pool = new Map(); for (const k of SRC) for (const [code, n] of info.comp[k]) if (code !== 255) pool.set(code, (pool.get(code) || 0) + n);
+    const best = [...pool].sort((a, b2) => b2[1] - a[1])[0];
+    if (best && best[0] !== y[0]) { target = best[0]; why = `${nameOf(best[0])} is the majority over the three methods`; }
+  }
+  return { text: parts.join(' · '), target, why, yours: y[0] };
+}
+function guessHtml() {
+  const g = guess(); if (!g) return '';
+  return `<div class="guess" id="selGuess"><b>What is this?</b> ${g.text}</div>
+    <div class="row guessbtns">${g.target != null ? `<button class="btn small" data-a="suggest" title="${esc(g.why)} — pre-sets the new label and the ticks; you still press Relabel">Suggest: ${esc(nameOf(g.target))}</button>` : '<span class="hint" style="margin:0">no change suggested</span>'}
+    ${S.comp ? '<button class="btn small" data-a="snap" title="Keep only the cells in the compartment most of the selection is in">Snap to compartment</button>' : ''}</div>`;
+}
+function suggest() {
+  const g = guess(); if (!g || g.target == null) return;
+  S.ref = 'corr'; S.target = g.target; S.suggested = g.target;
+  S.ticked = new Set(g.yours !== g.target ? [g.yours] : []);
+  renderPopover(); toast(`Suggested ${nameOf(g.target)}: ${g.why}. Press Relabel (Enter) to apply.`, 4500);
+}
+function snapCompartment() {
+  if (!S.comp || !S.selList.length) return;
+  const [c] = majority(S.comp, S.selList), keep = Array.from(S.selList).filter(i => S.comp[i] === c);
+  applySel('and', keep, null, null, 'snap');
+  toast(`Snapped to ${S.assist.compartments[c]} cells: ${nCells(keep.length)}`);
+}
+
+// ---------------------------------------------------------------- review queue (side tab): disagreement hotspots
+async function loadQueue(kind) {
+  try {
+    const r = await api('/api/assist/queue?kind=' + kind);
+    const cur = S.queue && S.queue.kind === kind ? S.queue.cur : -1;
+    S.queue = { ...r, cur };
+    renderReview();
+  } catch (e) { fail(e); }
+}
+function confusionText(c) {      // an agent "agrees" when under 30% of Bill's main class are relabelled by it
+  const b = nameOf(c.bill_eugene_code), off = k => c[k] !== c.bill_eugene_code && c[k + '_pct'] >= 30;
+  const v = off('vestrum') && nameOf(c.vestrum), cc = off('claude_code') && nameOf(c.claude_code);
+  if (v && v === cc) return `Bill ${b} → agents ${v} (V ${c.vestrum_pct}% · C ${c.claude_code_pct}%)`;
+  const part = (n, name, pct) => n ? `${name} ${n} ${pct}%` : `${name} mostly agrees`;
+  return `Bill ${b} → ${[part(v, 'Vestrum', c.vestrum_pct), part(cc, 'Claude', c.claude_code_pct)].sort((x, y) => x.includes('agrees') - y.includes('agrees')).join(' · ')}`;
+}
+function renderReview() {
+  const pane = $('#reviewPane'); if (!pane) return;
+  const Q = S.queue;
+  $('#nReview').textContent = Q ? `${Q.n_done}/${Q.items.length}` : '';
+  if (!Q) { pane.innerHTML = '<p class="hint">Loading disagreement hotspots…</p>'; return; }
+  pane.innerHTML = `<h3>Review queue</h3>
+    <div class="seg mini" id="qKind"><button data-k="any" class="${Q.kind === 'any' ? 'on' : ''}">Any agent ≠ Bill</button><button data-k="both" class="${Q.kind === 'both' ? 'on' : ''}">Both agents agree, Bill differs</button></div>
+    <p class="hint" style="margin-top:8px">${Q.kind === 'both' ? 'Connected patches where both agents agree against Bill (1-cell gaps allowed)' : 'One confusion (Bill → agent label) in one Novae domain per item, adjacent cells only'};
+      20–1,500 cells (bigger patches are cut into pieces). Ranked by expected fixes: a cell counts 1 when both agents differ from Bill, ⅓ when one does. An item is done when one edit covers half of it.</p>
+    <div class="row"><b id="qProg">${fmt(Q.n_done)} / ${fmt(Q.items.length)} done</b><span class="grow"></span>
+      <button class="btn small" id="qPrev" title="Previous item (Shift+J)">‹ Prev <kbd>⇧J</kbd></button><button class="btn small primary" id="qNext" title="Next item not done yet (J)">Next › <kbd>J</kbd></button></div>
+    <div class="bar"><i style="width:${Q.items.length ? 100 * Q.n_done / Q.items.length : 0}%"></i></div>
+    <div class="list" style="margin-top:8px"></div>`;
+  pane.querySelectorAll('#qKind button').forEach(b => b.onclick = () => loadQueue(b.dataset.k));
+  $('#qPrev').onclick = () => queueStep(-1); $('#qNext').onclick = () => queueStep(1);
+  const list = pane.querySelector('.list');
+  Q.items.slice(0, 300).forEach((it, k) => {
+    const row = el('div', 'item' + (k === Q.cur ? ' cur' : '') + (it.done ? ' done' : ''), `<div class="meta"><b>#${k + 1}</b><span>${esc(it.section)}</span><span>${nCells(it.n)}</span><span title="expected fixes">≈ ${fmt(Math.round(it.score ?? it.n))}</span>${it.domain ? `<span>${esc(it.domain)}</span>` : ''}${it.done ? '<span class="tag ok">done</span>' : ''}</div>
+      <div class="txt">${esc(confusionText(it.confusion))}</div>`);
+    row.onclick = () => queueGo(k);
+    list.append(row);
+  });
+  if (!Q.items.length) list.append(el('p', 'hint', 'No hotspots in this list.'));
+}
+async function queueGo(k) {
+  const Q = S.queue; if (!Q || !Q.items[k]) return;
+  const it = Q.items[k]; Q.cur = k;
+  try {
+    const r = await api(`/api/assist/queue/${Q.kind}/${it.id}`);
+    const [x0, y0, x1, y1] = it.bbox_px, pad = Math.max(60, 0.15 * Math.max(x1 - x0, y1 - y0));
+    fitImageRect(x0 - pad, y0 - pad, x1 + pad, y1 + pad);
+    S.gestT0 = performance.now();
+    applySel('replace', r.cells, { type: 'Assist', tool: 'queue', px: [[(x0 + x1) / 2, (y0 + y1) / 2]] }, S.panels[1], 'queue');
+    showTab('review'); renderReview();
+  } catch (e) { fail(e); }
+}
+function queueStep(dir) {
+  const Q = S.queue;
+  if (!Q) { showTab('review'); return; }
+  if (!Q.items.length) { toast('No hotspots in this list.'); return; }
+  const n = Q.items.length;
+  if (dir < 0) { queueGo(Q.cur <= 0 ? n - 1 : Q.cur - 1); return; }
+  for (let s = 1; s <= n; s++) { const k = (Q.cur + s + n) % n; if (!Q.items[k].done) { queueGo(k); return; } }
+  toast('Every item in this list is done.');
+}
 
 // ---------------------------------------------------------------- right-click and header menus
 function contextMenu(P, h, cx, cy) {
@@ -756,13 +989,13 @@ function contextMenu(P, h, cx, cy) {
   }
   if (h.op && !h.inSel) {
     sep(`Edit · ${opText(h.op)}`);
-    add('Select this region again', () => selectPolygon(h.op.geometry.px, P));
+    add('Select this region again', () => { S.gestT0 = performance.now(); selectPolygon(h.op.geometry.px, P, 'replace', 'reselect'); });
     add('Undo this edit', () => undo(h.op.id), 'danger');
   }
   if (h.cell != null) {
     sep('Cell');
     add('Show its labels', () => { S.sel = h.cell; redraw(); api('/api/cell/' + h.cell).then(showCell).catch(fail); });
-    add('Select this cell', () => applySel('replace', [h.cell], { type: 'Point', px: [[S.cells.px[h.cell], S.cells.py[h.cell]]] }, P));
+    add('Select this cell', () => { S.gestT0 = performance.now(); applySel('replace', [h.cell], { type: 'Point', px: [[S.cells.px[h.cell], S.cells.py[h.cell]]] }, P, 'cell'); });
     add('Relabel this cell…', () => relabelDialog({ cells: [h.cell] }));
     add('Comment on this cell', () => commentDialog({ geometry: { type: 'Point', px: [[S.cells.px[h.cell], S.cells.py[h.cell]]] } }));
   }
@@ -802,7 +1035,7 @@ function relabelDialog({ cells }) {
     <div class="acts"><button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn primary">Relabel</button></div>`,
   async fd => {
     const to = await ensureLabel(+fd.get('to')); if (to == null) return false;
-    await applyOp({ op: 'relabel', to, cells });
+    await applyOp({ op: 'relabel', to, cells, tool: 'cell-dialog' });
   });
 }
 
@@ -899,6 +1132,7 @@ function saveDialog() {
 
 // ---------------------------------------------------------------- side panes
 function showTab(t) {
+  if (t === 'review' && !S.queue) loadQueue('any');
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
   document.querySelectorAll('.pane').forEach(p => p.classList.toggle('on', p.dataset.pane === t));
 }
@@ -965,9 +1199,9 @@ function renderLog() {
     <p class="hint">Removes every edit, comment, annotation and label change of ${esc(S.reviewer)}. The session is archived, not deleted.</p>`;
   [...S.ops].reverse().forEach(o => {
     const it = el('div', 'item', `<div class="meta"><span class="keychip" style="--bc:${opColour(o)}">${o.op === 'base' ? (o.scope ? 'start' : 'picked') : o.op}</span><span>${esc(opText(o))}</span>
-      ${o.filter_name ? `<span class="tag">only ${esc(o.filter_name)}</span>` : ''}${o.filter_names ? `<span class="tag">only ${esc(o.filter_names.join(', '))} (${esc(o.filter_ref === 'corr' ? 'yours' : shortName(o.filter_ref))})</span>` : ''}<span>${esc(o.ts?.slice(11, 16))}</span></div>
+      ${o.filter_name ? `<span class="tag">only ${esc(o.filter_name)}</span>` : ''}${o.filter_names ? `<span class="tag">only ${esc(o.filter_names.join(', '))} (${esc(o.filter_ref === 'corr' ? 'yours' : shortName(o.filter_ref))})</span>` : ''}${o.tool && o.tool !== 'section' ? `<span class="tag">${esc(o.tool)}</span>` : ''}<span>${esc(o.ts?.slice(11, 16))}</span></div>
       <div class="acts">${o.scope ? '' : '<button class="btn small" data-a="sel">Select region</button>'}<button class="btn small danger" data-a="undo">Undo</button></div>`);
-    it.onclick = e => { const a = e.target.dataset.a; if (a === 'undo') undo(o.id); else if (a === 'sel') { flyTo(o.geometry.px); selectPolygon(o.geometry.px, S.panels[1]); } else if (!o.scope) flyTo(o.geometry.px); };
+    it.onclick = e => { const a = e.target.dataset.a; if (a === 'undo') undo(o.id); else if (a === 'sel') { flyTo(o.geometry.px); S.gestT0 = performance.now(); selectPolygon(o.geometry.px, S.panels[1], 'replace', 'reselect'); } else if (!o.scope) flyTo(o.geometry.px); };
     pane.querySelector('.list').append(it);
   });
   $('#resetBtn').onclick = resetDialog;
@@ -985,10 +1219,10 @@ function renderLegend() {
   L.append(nl);
 }
 
-function renderAll() { renderEdit(); renderComments(); renderAnnots(); renderLabels(); renderLog(); renderLegend(); if (S.selInfo) renderPopover(); redraw(); }
+function renderAll() { renderEdit(); renderComments(); renderAnnots(); renderLabels(); renderLog(); renderLegend(); renderReview(); if (S.selInfo) renderPopover(); redraw(); }
 
 // ---------------------------------------------------------------- wiring
-document.querySelectorAll('#modes button, #modes2 button').forEach(b => b.onclick = () => setMode(b.dataset.mode));
+document.querySelectorAll('#modes button, #modes2 button, #modes3 button').forEach(b => b.onclick = () => setMode(b.dataset.mode));
 document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => showTab(b.dataset.tab));
 $('#disagree').onchange = e => { S.disagree = e.target.checked; redraw(); };
 $('#showOps').onchange = e => { S.showOps = e.target.checked; redraw(); };
@@ -1007,8 +1241,11 @@ window.addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
   if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); undo(); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
-  const modes = { v: 'pan', l: 'lasso', e: 'lasso', p: 'poly', r: 'rect', b: 'brush', s: 'cell', c: 'pin', m: 'area', a: 'annot' };
+  const modes = { v: 'pan', l: 'lasso', e: 'lasso', p: 'poly', r: 'rect', b: 'brush', s: 'cell', c: 'pin', m: 'area', a: 'annot', w: 'wand', g: 'walker' };
+  if (S.assist?.stains) modes.k = 'comp';
+  if (S.novaeRes) modes.n = 'novae';
   if (modes[k]) setMode(modes[k]);
+  else if (k === 'j') queueStep(e.shiftKey ? -1 : 1);
   else if (k === 'd') { const c = $('#disagree'); c.checked = !c.checked; c.onchange({ target: c }); }
   else if (k === '[' || k === ']') setBrush(S.brushPx * (k === '[' ? 0.8 : 1.25));
   else if (/^[1-9]$/.test(k) && S.selInfo) { const c = quickList()[+k - 1]; if (c != null) { S.target = c; renderPopover(); } }
