@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PathQC</title>
+<link rel="stylesheet" href="/web/app.css">
+<script src="/web/vendor/openseadragon.min.js"></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand">PathQC <small id="packname"></small></div>
+  <div id="imgbadge" class="badge"></div>
+  <div class="grow"></div>
+  <button class="chip-btn" id="reviewerBtn" title="Change reviewer">Reviewer: <b id="reviewerName">—</b></button>
+  <button class="btn primary" id="saveBtn">Save results</button>
+</header>
+
+<div class="toolbar" role="toolbar">
+  <div class="seg" id="modes">
+    <button data-mode="pan" class="on" title="Pan and zoom; click a cell to inspect (V)">Pan <kbd>V</kbd></button>
+    <button data-mode="edit" title="Drag to draw a region, then pick labels and relabel (E). Shift+drag does the same in Pan.">Draw region <kbd>E</kbd></button>
+    <button data-mode="pin" title="Click to pin a comment (C)">Comment point <kbd>C</kbd></button>
+    <button data-mode="area" title="Drag to draw an area and comment on it (R)">Comment area <kbd>R</kbd></button>
+    <button data-mode="annot" title="Drag to draw a named polygon (A)">Annotate <kbd>A</kbd></button>
+  </div>
+  <span class="hint" style="margin:0" title="Shift+drag on any panel draws a region; right-click opens the menu"><kbd>Shift</kbd>+drag · right-click</span>
+  <span class="sep"></span>
+  <label class="ctl">Go to <select id="secJump"></select></label>
+  <label class="ctl" title="Hide cells where all three methods give the same label"><input type="checkbox" id="disagree"> Only disagreements <kbd>D</kbd></label>
+  <label class="ctl"><input type="checkbox" id="showOps" checked> Show edit regions</label>
+  <label class="ctl">Dots <input type="range" id="dotSize" min="0.5" max="2.5" step="0.1" value="1"></label>
+  <label class="ctl" title="Fade the slide under the label layers">Fade slide <input type="range" id="wash" min="0" max="0.9" step="0.05" value="0.55"></label>
+  <span class="grow"></span>
+  <button class="btn" id="clearBtn" title="Clear the current region and cell selection (Esc)">Clear</button>
+  <button class="btn" id="undoBtn" title="Undo last edit (Ctrl+Z)">Undo</button>
+</div>
+
+<main class="main">
+  <section class="stage">
+    <div class="grid" id="grid"><div id="pop" class="pop" hidden></div></div>
+    <div class="legend" id="legend"></div>
+  </section>
+  <aside class="side">
+    <div id="cellBox" class="cellbox" hidden></div>
+    <nav class="tabs" id="tabs">
+      <button data-tab="edit" class="on">Edit</button>
+      <button data-tab="comments">Comments <span id="nComments" class="cnt"></span></button>
+      <button data-tab="annots">Annotations <span id="nAnnots" class="cnt"></span></button>
+      <button data-tab="labels">Labels</button>
+      <button data-tab="log">Log <span id="nOps" class="cnt"></span></button>
+    </nav>
+    <div class="tabbody">
+      <div data-pane="edit" class="pane on" id="editPane"></div>
+      <div data-pane="comments" class="pane" id="commentsPane"></div>
+      <div data-pane="annots" class="pane" id="annotsPane"></div>
+      <div data-pane="labels" class="pane" id="labelsPane"></div>
+      <div data-pane="log" class="pane" id="logPane"></div>
+    </div>
+  </aside>
+</main>
+
+<div id="ctx" class="ctx" hidden></div>
+<dialog id="dlg"><form method="dialog" id="dlgForm"></form></dialog>
+<div id="toast" class="toast" hidden></div>
+<script src="/web/app.js"></script>
+</body>
+</html>

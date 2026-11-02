@@ -1,0 +1,53 @@
+name: Build PathQC app
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14          # Apple Silicon
+            name: macos-arm64
+          - os: ubuntu-latest
+            name: linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install app dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r packaging/requirements-app.txt
+
+      - name: Build the app (bundles the synthetic demo pack only)
+        run: bash packaging/build_app.sh
+
+      - name: Smoke test the built app
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then EXE=dist/PathQC.app/Contents/MacOS/PathQC; else EXE=dist/PathQC/PathQC; fi
+          python packaging/smoke_test.py "$EXE"
+
+      - name: Package
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            ditto -c -k --sequesterRsrc --keepParent dist/PathQC.app PathQC-${{ matrix.name }}.zip
+          else
+            tar -czf PathQC-${{ matrix.name }}.tar.gz -C dist PathQC
+          fi
+          ls -la PathQC-*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PathQC-${{ matrix.name }}
+          path: PathQC-${{ matrix.name }}.*
+          retention-days: 30
