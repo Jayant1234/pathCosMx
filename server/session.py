@@ -2,10 +2,11 @@
 
 Every geometry is stored in slide millimetres (the CosMx frame), never in image pixels, so the
 work survives swapping the stand-in image for the registered H&E. Cell sets are stored as row
-indices into the pack's cell table, fixed at the time of the edit.
+indices into the pack's cell table, fixed at the time of the edit; a whole-section op (start pick,
+Restart, Clear) stores only its section names and is resolved against the pack at replay.
 
 Corrected label of a cell = Bill_eugene_code, then every non-undone op in log order; the last op
-touching the cell wins.
+touching the cell wins. A "clear" op puts its cells (a section, or all) back to untouched.
 """
 import json
 import re
@@ -32,8 +33,10 @@ def now():
 
 
 class Session:
-    def __init__(self, root: Path, reviewer: str, base_vocab, n_cells):
+    def __init__(self, root: Path, reviewer: str, base_vocab, n_cells, section_cells=None):
         self.reviewer = reviewer
+        self.section_cells = section_cells or {}      # section name -> cell indices
+        self._idx = {}                                 # op id or sections -> cell indices (cached)
         self.dir = root / slug(reviewer)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
@@ -114,7 +117,20 @@ class Session:
     # ---------- edit log
     def active_ops(self):
         undone = {o["target"] for o in self.ops if o["op"] == "undo"}
-        return [o for o in self.ops if o["op"] in ("base", "relabel") and o["id"] not in undone]
+        return [o for o in self.ops if o["op"] in ("base", "relabel", "clear") and o["id"] not in undone]
+
+    def op_cells(self, o):
+        """Cell indices of an op: its stored list, or the cells of its sections."""
+        key = o["id"] if "cells" in o else tuple(o["sections"])
+        idx = self._idx.get(key)
+        if idx is None:
+            if "cells" in o:
+                idx = np.asarray(o["cells"], dtype=np.int64)
+            else:
+                idx = np.concatenate([self.section_cells[s] for s in o["sections"] if s in self.section_cells]
+                                     or [np.zeros(0, np.int64)])
+            self._idx[key] = idx
+        return idx
 
     def replay(self, src_codes):
         """Return (final uint16[N], tag uint8[N], op_index int32[N]) for the current log."""
@@ -122,8 +138,13 @@ class Session:
         tag = np.zeros(self.n, np.uint8)
         opi = np.full(self.n, -1, np.int32)
         for k, o in enumerate(self.active_ops()):
-            idx = np.asarray(o["cells"], dtype=np.int64)
+            idx = self.op_cells(o)
             if idx.size == 0:
+                continue
+            if o["op"] == "clear":                      # the section(s) go back to untouched
+                final[idx] = src_codes["bill_eugene_code"][idx]
+                tag[idx] = TAG_DEFAULT
+                opi[idx] = -1
                 continue
             if o["op"] == "base":
                 vals = src_codes[o["source"]][idx]

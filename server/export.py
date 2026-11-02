@@ -60,7 +60,7 @@ def corrected_table(pack, sess):
 def base_picks(pack, sess):
     rows = []
     for o in sess.active_ops():
-        idx = np.asarray(o["cells"], dtype=np.int64)
+        idx = sess.op_cells(o)
         secs = pack.cells.section.values[idx] if idx.size else []
         rows.append({
             "op_id": o["id"], "ts": o["ts"], "op": o["op"],

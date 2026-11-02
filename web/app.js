@@ -19,13 +19,18 @@ const nCells = n => `${fmt(n)} cell${n === 1 ? '' : 's'}`;
 const S = {
   reviewer: null, manifest: null, image: null, vocab: [], root: null, byCode: {},
   cells: null, final: null, tag: null, comments: [], annotations: [], ops: [],
-  panels: [], mode: 'pan', oneShot: false, draw: null,
-  region: null, regionPanel: 0, regionInfo: null, regionFilter: null, regionUsed: false,
+  panels: [], mode: 'pan', oneShot: false, draw: null, hover: null, brushPx: 18,
+  // selection: a set of cell indices (mask + list) and the shapes that made it (image px, logged in mm)
+  mask: null, selList: new Int32Array(0), selGeoms: [], selPanel: 0, selInfo: null, selBox: null, selUsed: false,
+  ref: 'corr', ticked: new Set(), target: null, recent: [],
   hidden: new Set(), disagree: false, showOps: true, dot: 1, wash: 0.55, layerAlpha: 0.9, untouched: 'faint',
-  sel: null, syncing: false, secBoxes: [],
+  sel: null, syncing: false, secBoxes: [], secTouched: [], secView: 0,
 };
 const layerName = () => `${S.reviewer.replace(/[^A-Za-z0-9_.-]+/g, '_')}_labels`;
 const sourceName = k => S.manifest.sources.find(s => s.key === k)?.name ?? k;
+const shortName = k => sourceName(k).split(/[_ ]/)[0];
+const REFS = () => [['corr', 'yours'], ...SRC.map(k => [k, shortName(k)])];
+const refArray = r => r === 'corr' ? S.final : S.cells.src[SRC.indexOf(r)];
 
 // ---------------------------------------------------------------- API
 function q(path) { return path + (path.includes('?') ? '&' : '?') + 'reviewer=' + encodeURIComponent(S.reviewer); }
@@ -64,7 +69,7 @@ async function load() {
   await loadFinal();
   if (!S.panels.length) buildPanels();
   S.panels.find(P => P.mine).titleEl.textContent = layerName();
-  clearSelection(false);
+  deselect();
   renderAll();
 }
 
@@ -77,6 +82,7 @@ async function loadCells() {
   const sec = new Uint8Array(buf, o, n); o += n;
   const src = SRC.map((_, k) => new Uint8Array(buf, o + k * n, n));
   S.cells = { n, px, py, sec, src };
+  S.mask = new Uint8Array(n);
   const W = S.image.width, H = S.image.height, gw = Math.ceil(W / GRID), gh = Math.ceil(H / GRID);
   const bucket = new Int32Array(n), count = new Int32Array(gw * gh + 1);
   for (let i = 0; i < n; i++) { const b = Math.min(gh - 1, Math.max(0, py[i] / GRID | 0)) * gw + Math.min(gw - 1, Math.max(0, px[i] / GRID | 0)); bucket[i] = b; count[b + 1]++; }
@@ -95,6 +101,18 @@ async function loadFinal() {
   const n = S.cells.n;
   S.final = new Uint16Array(buf.slice(0, 2 * n));
   S.tag = new Uint8Array(buf.slice(2 * n));
+  S.secTouched = S.secBoxes.map(() => 0);
+  for (let i = 0; i < n; i++) if (S.tag[i]) S.secTouched[S.cells.sec[i]]++;
+  S.cardSec = null;          // force the start card to re-render
+}
+
+// the section nearest the centre of the view (the one the start card, Restart and Clear act on)
+function sectionInView() {
+  const P = S.panels[0], m = P && mapping(P); if (!m || !S.secBoxes.length) return 0;
+  const [cx, cy] = m.toI(P.el.clientWidth / 2, P.el.clientHeight / 2);
+  let best = 0, bd = Infinity;
+  S.secBoxes.forEach((b, k) => { const dx = Math.max(b.x0 - cx, 0, cx - b.x1), dy = Math.max(b.y0 - cy, 0, cy - b.y1), d = dx * dx + dy * dy - (dx || dy ? 0 : 1); if (d < bd) { bd = d; best = k; } });
+  return best;
 }
 
 // ---------------------------------------------------------------- panels
@@ -128,9 +146,13 @@ function buildPanels() {
       ctl.querySelector('select').onchange = e => { S.untouched = e.target.value; redraw(); };
       ctl.querySelector('input').oninput = e => { S.layerAlpha = +e.target.value; redraw(); };
       ph.append(ctl);
+      const hb = el('span', 'hbtns', `<button class="btn small" id="restartBtn" title="Pick the labels this section (or all) starts from again">Restart from…</button>
+        <button class="btn small danger" id="layerClearBtn" title="Empty ${esc(layerName())} for this section (undoable)">Clear</button>`);
+      ph.append(hb);
     }
     ph.append(el('span', 's', esc(spec.sub)));
     p.append(osdDiv, cv, ph); grid.append(p);
+    if (spec.mine) { const card = el('div', 'startcard'); card.id = 'startCard'; card.hidden = true; p.append(card); }
     const viewer = OpenSeadragon({
       element: osdDiv, tileSources: S.image.dzi, showNavigationControl: false, showNavigator: k === 0,
       navigatorPosition: 'BOTTOM_RIGHT', navigatorSizeRatio: 0.16, animationTime: 0.25, blendTime: 0,
@@ -144,7 +166,43 @@ function buildPanels() {
     viewer.addHandler('canvas-click', e => { if (e.quick && S.mode === 'pan') panClick(P, e.position); });
     attachPointer(P);
   });
-  new ResizeObserver(redraw).observe(grid);
+  new ResizeObserver(() => redraw()).observe(grid);
+  $('#restartBtn').onclick = e => { const r = e.target.getBoundingClientRect(); showMenu(restartItems(), r.left, r.bottom + 2); };
+  $('#layerClearBtn').onclick = e => { const r = e.target.getBoundingClientRect(); showMenu(clearItems(), r.left, r.bottom + 2); };
+}
+
+// ---------------------------------------------------------------- start card, Restart from…, Clear (whole sections)
+function renderStartCard() {
+  const card = $('#startCard'); if (!card || !S.final) return;
+  const k = S.secView = sectionInView(), b = S.secBoxes[k];
+  const show = !S.secTouched[k];
+  card.hidden = !show;
+  if (!show || S.cardSec === k) return;
+  S.cardSec = k;
+  card.innerHTML = `<div class="sc-h">Start <b>${esc(layerName())}</b> for <b>${esc(b.name)}</b> — pick the labels to start from:</div>
+    <div class="sc-b">${S.manifest.sources.map(s => `<button class="btn base" data-start="${s.key}" style="--bc:${BASECOL[s.key]}"><span><i class="dot"></i>${esc(s.name)}</span></button>`).join('')}</div>
+    ${b.dev ? `<div class="warnbox">${esc(b.name)} is a dev section: Vestrum is in-sample here.</div>` : ''}
+    <label class="sc-all"><input type="checkbox" id="startAll"> apply to all sections</label>`;
+  card.querySelectorAll('[data-start]').forEach(x => x.onclick = () => sectionOp('base', x.dataset.start, $('#startAll').checked));
+}
+
+function sectionOp(op, source, all) {
+  const secs = all ? S.manifest.sections : [S.secBoxes[S.secView].name];
+  return applyOp({ op, source, sections: secs }, true);
+}
+function restartItems() {
+  const name = S.secBoxes[S.secView = sectionInView()].name, items = [{ sep: true, title: `Restart ${name} from` }];
+  for (const s of S.manifest.sources) items.push({ label: `${s.name} labels`, fn: () => sectionOp('base', s.key, false), cls: 'strong' });
+  items.push({ sep: true, title: 'All sections from' });
+  for (const s of S.manifest.sources) items.push({ label: `${s.name} labels (all sections)`, fn: () => sectionOp('base', s.key, true) });
+  return items;
+}
+function clearItems() {
+  const name = S.secBoxes[S.secView = sectionInView()].name;
+  return [{ sep: true, title: `Clear ${layerName()}` },
+    { label: `Clear ${name} (this section)`, fn: () => sectionOp('clear', null, false), cls: 'danger' },
+    { label: 'Clear all sections', fn: () => sectionOp('clear', null, true), cls: 'danger' },
+    { sep: true, title: 'Comments and annotations stay · Undo reverts' }];
 }
 
 function syncFrom(P) {
@@ -171,8 +229,12 @@ function mapping(P) {   // image px <-> panel screen px (linear, no rotation)
 }
 
 // ---------------------------------------------------------------- drawing
-let raf = 0;
-function redraw() { if (!raf) raf = requestAnimationFrame(() => { raf = 0; S.panels.forEach(drawPanel); placePopover(); }); }
+let raf = 0, full = true;
+// redraw(true): only the drawn shape / brush cursor moved, so the cached cell layer is reused
+function redraw(overlay = false) {
+  if (!overlay) full = true;
+  if (!raf) raf = requestAnimationFrame(() => { raf = 0; const f = full; full = false; S.panels.forEach(P => drawPanel(P, f)); placePopover(); renderStartCard(); });
+}
 
 function layerArray(P) { return P.layer === 'corr' ? S.final : S.cells.src[P.layer]; }
 
@@ -181,42 +243,73 @@ function agreeAll(i) {
   return a !== 255 && b !== 255 && c !== 255 && r[a] === r[b] && r[b] === r[c];
 }
 
-function drawPanel(P) {
-  const dpr = window.devicePixelRatio || 1, W = P.cv.clientWidth, H = P.cv.clientHeight;
-  if (P.cv.width !== Math.round(W * dpr) || P.cv.height !== Math.round(H * dpr)) { P.cv.width = Math.round(W * dpr); P.cv.height = Math.round(H * dpr); }
+function drawPanel(P, full = true) {
+  const dpr = window.devicePixelRatio || 1, W = P.cv.clientWidth, H = P.cv.clientHeight, cw = Math.round(W * dpr), ch = Math.round(H * dpr);
+  if (P.cv.width !== cw || P.cv.height !== ch) { P.cv.width = cw; P.cv.height = ch; full = true; }
   const ctx = P.ctx; ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, W, H);
   const m = mapping(P); if (!m || !S.cells) return;
   const alpha = P.mine ? S.layerAlpha : 1;
   if (P.layer != null && alpha > 0) {          // the bare slide panel draws no cells
-    if (S.wash > 0) { ctx.fillStyle = `rgba(250,250,252,${S.wash * alpha})`; ctx.fillRect(0, 0, W, H); }
-    drawCells(ctx, m, layerArray(P), W, H, alpha, P.mine ? S.untouched : null);
+    const C = P.cache || (P.cache = document.createElement('canvas'));
+    if (full || C.width !== cw || C.height !== ch) {
+      if (S.wash > 0) { ctx.fillStyle = `rgba(250,250,252,${S.wash * alpha})`; ctx.fillRect(0, 0, W, H); }
+      drawCells(ctx, m, layerArray(P), W, H, alpha, P.mine ? S.untouched : null);
+      if (S.selList.length) {                  // dim the rest, redraw the selected cells in full colour
+        ctx.fillStyle = 'rgba(250,250,252,.66)'; ctx.fillRect(0, 0, W, H);
+        drawCells(ctx, m, layerArray(P), W, H, Math.max(alpha, 0.9), P.mine ? S.untouched : null, S.selList);
+      }
+      if (C.width !== cw || C.height !== ch) { C.width = cw; C.height = ch; }   // keep the cell layer for overlay-only frames
+      const cx = C.getContext('2d'); cx.clearRect(0, 0, cw, ch); cx.drawImage(P.cv, 0, 0);
+    } else ctx.drawImage(C, 0, 0, W, H);
   }
   drawSections(ctx, m);
   drawShapes(P, ctx, m);
+  drawSelection(P, ctx, m, W, H);
 }
 
-function drawCells(ctx, m, arr, W, H, alpha, untouched) {
+function drawSelection(P, ctx, m, W, H) {
+  const { px, py } = S.cells, r = Math.min(9, Math.max(1.6, NUCLEUS_UM / (S.image.um_per_px || 1) * m.s)) * S.dot + 1.2;
+  const ring = (list, colour) => {
+    if (!list.length) return;
+    ctx.beginPath();
+    for (const i of list) { const x = m.ox + px[i] * m.s, y = m.oy + py[i] * m.s; if (x < -9 || y < -9 || x > W + 9 || y > H + 9) continue; ctx.moveTo(x + r, y); ctx.arc(x, y, r, 0, 6.2832); }
+    ctx.lineWidth = r > 3 ? 1.6 : 1; ctx.strokeStyle = colour; ctx.stroke();
+  };
+  if (P.layer == null || r >= 4) ring(S.selList, P.layer == null ? '#1f6fd1' : 'rgba(31,111,209,.7)');
+  const d = S.draw;
+  if (d && d.kind === 'brush') ring(d.cells, d.sel === 'sub' ? '#e5484d' : '#1f6fd1');
+  for (const g of S.selGeoms) {
+    ctx.strokeStyle = g.mode === 'sub' ? '#e5484d' : '#1f6fd1';
+    if (g.type === 'Brush') { ctx.save(); ctx.globalAlpha = 0.13; ctx.lineCap = ctx.lineJoin = 'round'; ctx.lineWidth = 2 * g.r_px * m.s; path(ctx, m, g.px, false); if (g.px.length === 1) ctx.lineTo(...m.toS(g.px[0][0] + 0.01, g.px[0][1])); ctx.stroke(); ctx.restore(); continue; }
+    if (g.type !== 'Polygon') continue;
+    path(ctx, m, g.px); ctx.lineWidth = 2; if (g.mode === 'sub') ctx.setLineDash([6, 4]); ctx.stroke(); ctx.setLineDash([]);
+    if (g.mode !== 'sub') { ctx.fillStyle = 'rgba(31,111,209,.06)'; ctx.fill(); }
+  }
+  if (S.hover && S.hover.P === P && S.mode === 'brush') { ctx.beginPath(); ctx.arc(S.hover.sx, S.hover.sy, S.brushPx, 0, 6.2832); ctx.lineWidth = 1.5; ctx.strokeStyle = '#1f6fd1'; ctx.setLineDash([3, 3]); ctx.stroke(); ctx.setLineDash([]); }
+  if (S.hover && S.mode === 'brush' && S.hover.P !== P) { const [x, y] = m.toS(...S.hover.pt); ctx.beginPath(); ctx.arc(x, y, S.brushPx, 0, 6.2832); ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(31,111,209,.6)'; ctx.stroke(); }
+}
+
+function drawCells(ctx, m, arr, W, H, alpha, untouched, only) {
   const { px, py } = S.cells, { gw, gh, start, order } = S.index;
   const [ix0, iy0] = m.toI(0, 0), [ix1, iy1] = m.toI(W, H);
   const bx0 = Math.max(0, ix0 / GRID | 0), bx1 = Math.min(gw - 1, ix1 / GRID | 0);
   const by0 = Math.max(0, iy0 / GRID | 0), by1 = Math.min(gh - 1, iy1 / GRID | 0);
   const r = Math.min(9, Math.max(1.1, NUCLEUS_UM / (S.image.um_per_px || 1) * m.s)) * S.dot;
   const bins = new Map();
-  for (let by = by0; by <= by1; by++) for (let bx = bx0; bx <= bx1; bx++) {
-    const b = by * gw + bx;
-    for (let j = start[b]; j < start[b + 1]; j++) {
-      const i = order[j], c = arr[i];
-      let root = c === 255 ? 255 : S.root[c];
-      if (untouched && S.tag[i] === 0) {        // reviewer layer: cells not yet picked or relabelled
-        if (untouched === 'hide') continue;
-        if (untouched === 'faint') root = -1;
-      }
-      if (S.hidden.has(root)) continue;
-      if (S.disagree && agreeAll(i)) continue;
-      let list = bins.get(root); if (!list) bins.set(root, list = []);
-      list.push(m.ox + px[i] * m.s, m.oy + py[i] * m.s);
+  const visit = only ? f => { for (const i of only) if (px[i] >= ix0 && px[i] <= ix1 && py[i] >= iy0 && py[i] <= iy1) f(i); }
+    : f => { for (let by = by0; by <= by1; by++) for (let bx = bx0; bx <= bx1; bx++) { const b = by * gw + bx; for (let j = start[b]; j < start[b + 1]; j++) f(order[j]); } };
+  visit(i => {
+    const c = arr[i];
+    let root = c === 255 ? 255 : S.root[c];
+    if (untouched && S.tag[i] === 0) {        // reviewer layer: cells not yet picked or relabelled
+      if (untouched === 'hide') return;
+      if (untouched === 'faint') root = -1;
     }
-  }
+    if (S.hidden.has(root)) return;
+    if (S.disagree && agreeAll(i)) return;
+    let list = bins.get(root); if (!list) bins.set(root, list = []);
+    list.push(m.ox + px[i] * m.s, m.oy + py[i] * m.s);
+  });
   ctx.globalAlpha = (r < 1.5 ? 0.95 : 0.82) * alpha;
   for (const [root, pts] of bins) {
     ctx.globalAlpha = (root === -1 ? 0.35 : (r < 1.5 ? 0.95 : 0.82)) * alpha;
@@ -240,10 +333,11 @@ function drawSections(ctx, m) {
 function path(ctx, m, pts, close = true) {
   ctx.beginPath(); pts.forEach((p, j) => { const [x, y] = m.toS(p[0], p[1]); j ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); if (close) ctx.closePath();
 }
-const opColour = o => o.op === 'base' ? BASECOL[o.source] : BASECOL.relabel;
+const opColour = o => o.op === 'base' ? BASECOL[o.source] : o.op === 'clear' ? '#6c7784' : BASECOL.relabel;
 
 function drawShapes(P, ctx, m) {
   if (S.showOps) for (const o of S.ops) {
+    if (o.scope) continue;              // whole-section picks and clears have no outline
     path(ctx, m, o.geometry.px); ctx.strokeStyle = opColour(o);
     if (P.mine) { ctx.lineWidth = 2; ctx.stroke(); ctx.globalAlpha = 0.07; ctx.fillStyle = opColour(o); ctx.fill(); ctx.globalAlpha = 1; }
     else { ctx.setLineDash([5, 4]); ctx.lineWidth = 1.3; ctx.stroke(); ctx.setLineDash([]); }
@@ -261,9 +355,14 @@ function drawShapes(P, ctx, m) {
     ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x - 7, y - 12); ctx.arc(x, y - 15, 7.6, Math.PI * 0.75, Math.PI * 0.25); ctx.closePath(); ctx.fill(); ctx.stroke();
     ctx.fillStyle = '#3a2b00'; ctx.font = '700 10px ' + getComputedStyle(document.body).fontFamily; ctx.textAlign = 'center'; ctx.fillText(String(k + 1), x, y - 11.5); ctx.textAlign = 'left';
   });
-  if (S.region) { path(ctx, m, S.region); ctx.lineWidth = 2.5; ctx.strokeStyle = '#1f6fd1'; ctx.stroke(); ctx.fillStyle = 'rgba(31,111,209,.08)'; ctx.fill(); }
-  if (S.draw && S.draw.pts.length) { path(ctx, m, S.draw.pts, false); ctx.lineWidth = 2; ctx.strokeStyle = '#ff2d55'; ctx.stroke(); }
+  const d = S.draw;
+  if (d && d.kind !== 'brush') {
+    const pts = d.kind === 'rect' ? rectPts(d.pts[0], d.b || d.pts[0]) : d.kind === 'poly' && d.cursor ? [...d.pts, d.cursor] : d.pts;
+    path(ctx, m, pts, d.kind === 'rect'); ctx.lineWidth = 2; ctx.strokeStyle = d.sel === 'sub' ? '#e5484d' : '#ff2d55'; ctx.stroke();
+    if (d.kind === 'poly') { ctx.fillStyle = '#ff2d55'; for (const p of d.pts) { const [x, y] = m.toS(p[0], p[1]); ctx.fillRect(x - 3, y - 3, 6, 6); } }
+  }
 }
+const rectPts = (a, b) => [[a[0], a[1]], [b[0], a[1]], [b[0], b[1]], [a[0], b[1]]];
 const anchor = pts => [pts.reduce((s, p) => s + p[0], 0) / pts.length, pts.reduce((s, p) => s + p[1], 0) / pts.length];
 
 function label(ctx, text, x, y, fg, bg) {
@@ -293,57 +392,124 @@ function nearestCell(ix, iy, rad) {
     }
   return best >= 0 ? best : null;
 }
+function cellsInPoly(poly) {
+  const { gw, gh, start, order } = S.index, { px, py } = S.cells, out = [];
+  const xs = poly.map(p => p[0]), ys = poly.map(p => p[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  for (let by = Math.max(0, y0 / GRID | 0); by <= Math.min(gh - 1, y1 / GRID | 0); by++)
+    for (let bx = Math.max(0, x0 / GRID | 0); bx <= Math.min(gw - 1, x1 / GRID | 0); bx++) {
+      const b = by * gw + bx;
+      for (let j = start[b]; j < start[b + 1]; j++) { const i = order[j], x = px[i], y = py[i]; if (x >= x0 && x <= x1 && y >= y0 && y <= y1 && inPoly([x, y], poly)) out.push(i); }
+    }
+  return out;
+}
+function brushAt(d, pt) {        // add the cells under a brush dab to the stroke being drawn
+  const { gw, gh, start, order } = S.index, { px, py } = S.cells, r = d.r;
+  for (let by = Math.max(0, (pt[1] - r) / GRID | 0); by <= Math.min(gh - 1, (pt[1] + r) / GRID | 0); by++)
+    for (let bx = Math.max(0, (pt[0] - r) / GRID | 0); bx <= Math.min(gw - 1, (pt[0] + r) / GRID | 0); bx++) {
+      const b = by * gw + bx;
+      for (let j = start[b]; j < start[b + 1]; j++) { const i = order[j]; if (!d.set.has(i) && (px[i] - pt[0]) ** 2 + (py[i] - pt[1]) ** 2 <= r * r) { d.set.add(i); d.cells.push(i); } }
+    }
+}
+function hull(list) {            // convex hull of cells (image px), for comments on a selection
+  const pts = Array.from(list, i => [S.cells.px[i], S.cells.py[i]]).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  if (pts.length < 3) { const [x, y] = pts[0]; return [[x - 8, y - 8], [x + 8, y - 8], [x + 8, y + 8], [x - 8, y + 8]]; }
+  const cr = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]), lo = [], up = [];
+  for (const p of pts) { while (lo.length > 1 && cr(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p); }
+  for (const p of pts.reverse()) { while (up.length > 1 && cr(up[up.length - 2], up[up.length - 1], p) <= 0) up.pop(); up.push(p); }
+  return lo.slice(0, -1).concat(up.slice(0, -1)).map(p => [Math.round(p[0] * 10) / 10, Math.round(p[1] * 10) / 10]);
+}
 function hits(P, sx, sy) {      // everything under a screen point of one panel
   const m = mapping(P), pt = m.toI(sx, sy), h = { pt };
-  if (S.region && inPoly(pt, S.region)) h.region = true;
+  h.cell = nearestCell(pt[0], pt[1], 10 / m.s);
+  h.inSel = S.selList.length > 0 && ((h.cell != null && S.mask[h.cell] === 1) || S.selGeoms.some(g => g.mode !== 'sub' && g.type === 'Polygon' && inPoly(pt, g.px)));
   h.comment = S.comments.findIndex(c => { const [ax, ay] = m.toS(...anchor(c.geometry.px)); return Math.hypot(ax - sx, ay - 15 - sy) < 12 || (c.geometry.type === 'Polygon' && inPoly(pt, c.geometry.px)); });
   h.annotation = S.annotations.findIndex(a => inPoly(pt, a.geometry.px));
-  for (let k = S.ops.length - 1; k >= 0; k--) if (inPoly(pt, S.ops[k].geometry.px)) { h.op = S.ops[k]; break; }
-  h.cell = nearestCell(pt[0], pt[1], 10 / m.s);
+  for (let k = S.ops.length - 1; k >= 0; k--) if (!S.ops[k].scope && inPoly(pt, S.ops[k].geometry.px)) { h.op = S.ops[k]; break; }
   return h;
 }
 
-// ---------------------------------------------------------------- modes, freehand drawing, clicks
-const MODE_KIND = { pin: 'comment', area: 'comment', edit: 'region', annot: 'annotation' };
+// ---------------------------------------------------------------- tools, drawing, clicks
+const SEL_TOOLS = ['lasso', 'poly', 'rect', 'brush', 'cell'];
 function setMode(mode, oneShot = false) {
-  S.mode = mode; S.oneShot = oneShot; S.draw = null;
-  document.querySelectorAll('#modes button').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
+  S.mode = mode; S.oneShot = oneShot; S.draw = null; if (mode !== 'brush') S.hover = null;
+  document.querySelectorAll('#modes button, #modes2 button').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
   S.panels.forEach(P => P.el.classList.toggle('drawing', mode !== 'pan'));
   redraw();
 }
+function setBrush(px) { S.brushPx = Math.max(4, Math.min(150, Math.round(px))); $('#brushSize').textContent = S.brushPx + ' px'; redraw(); }
 
 function attachPointer(P) {
   const pos = e => { const r = P.el.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+  const skip = e => e.target.closest('.ph') || e.target.closest('.startcard');
   // capture phase on the panel: runs before OpenSeadragon, so a draw gesture never pans the slide
   P.el.addEventListener('pointerdown', e => {
-    if (e.button !== 0 || e.target.closest('.ph')) return;
-    const kind = S.mode !== 'pan' ? S.mode : (e.shiftKey ? 'edit' : null);
-    if (!kind) return;
+    if (e.button !== 0 || skip(e)) return;
+    if (/INPUT|SELECT|TEXTAREA|BUTTON/.test(document.activeElement?.tagName)) document.activeElement.blur();   // keys go to the tools again
+    const tool = S.mode !== 'pan' ? S.mode : (e.shiftKey || e.altKey ? 'lasso' : null);
+    if (!tool) return;
     e.stopPropagation(); e.preventDefault();
-    const [sx, sy] = pos(e), pt = mapping(P).toI(sx, sy);
-    if (kind === 'pin') { finishDrawing('pin', P, { type: 'Point', px: [pt] }); return; }
+    const [sx, sy] = pos(e), m = mapping(P), pt = m.toI(sx, sy);
+    const sel = e.altKey ? 'sub' : e.shiftKey ? 'add' : 'replace';
+    if (tool === 'pin') { finishDrawing('pin', P, { type: 'Point', px: [pt] }); return; }
+    if (tool === 'cell') {
+      const c = nearestCell(pt[0], pt[1], 10 / m.s);
+      if (c == null) { if (sel === 'replace') deselect(); return; }
+      applySel(sel, [c], { type: 'Point', px: [[S.cells.px[c], S.cells.py[c]]] }, P); return;
+    }
+    if (tool === 'poly') {
+      const d = S.draw, t = performance.now();
+      if (d && d.kind === 'poly' && d.P === P) {
+        if (t - d.down.t < 350 && Math.hypot(sx - d.down.x, sy - d.down.y) < 8) { finishPoly(); return; }
+        d.pts.push(pt); d.down = { t, x: sx, y: sy }; redraw(); return;
+      }
+      S.draw = { P, kind: 'poly', sel, pts: [pt], down: { t, x: sx, y: sy } }; redraw(); return;
+    }
     P.el.setPointerCapture(e.pointerId);
-    S.draw = { P, kind, pts: [pt], last: [sx, sy] }; redraw();
+    S.draw = { P, kind: tool, sel, pts: [pt], last: [sx, sy] };
+    if (tool === 'brush') { Object.assign(S.draw, { r: S.brushPx / m.s, cells: [], set: new Set() }); brushAt(S.draw, pt); }
+    redraw();
   }, true);
   P.el.addEventListener('pointermove', e => {
-    if (!S.draw || S.draw.P !== P) return;
-    e.stopPropagation();
     const [sx, sy] = pos(e);
-    if (Math.hypot(sx - S.draw.last[0], sy - S.draw.last[1]) < 4) return;
-    S.draw.last = [sx, sy]; S.draw.pts.push(mapping(P).toI(sx, sy)); redraw();
+    if (S.mode === 'brush') { S.hover = { P, sx, sy, pt: mapping(P).toI(sx, sy) }; redraw(true); }
+    const d = S.draw; if (!d || d.P !== P) return;
+    e.stopPropagation();
+    const pt = mapping(P).toI(sx, sy);
+    if (d.kind === 'poly') { d.cursor = pt; redraw(true); return; }
+    if (d.kind === 'rect') { d.b = pt; redraw(true); return; }
+    if (Math.hypot(sx - d.last[0], sy - d.last[1]) < 4) return;
+    if (d.kind === 'brush') {              // dab along the segment so a fast stroke leaves no gaps
+      const a = d.pts[d.pts.length - 1], steps = Math.ceil(Math.hypot(pt[0] - a[0], pt[1] - a[1]) / (d.r / 2));
+      for (let s = 1; s <= steps; s++) brushAt(d, [a[0] + (pt[0] - a[0]) * s / steps, a[1] + (pt[1] - a[1]) * s / steps]);
+    }
+    d.last = [sx, sy]; d.pts.push(pt); redraw(true);
   }, true);
   P.el.addEventListener('pointerup', e => {
-    if (!S.draw || S.draw.P !== P) return;
-    e.stopPropagation();
-    const { pts, kind } = S.draw; S.draw = null;
-    if (pts.length < 3) { redraw(); toast('Trace a closed shape: hold the button and draw around the area.'); return; }
-    finishDrawing(kind, P, { type: 'Polygon', px: simplify(pts) });
+    const d = S.draw; if (!d || d.P !== P || d.kind === 'poly') return;
+    e.stopPropagation(); S.draw = null;
+    if (d.kind === 'brush') { applySel(d.sel, d.cells, { type: 'Brush', px: simplify(d.pts), r_px: Math.round(d.r * 10) / 10 }, P); if (S.oneShot) setMode('pan'); return; }
+    if (d.kind === 'rect') {
+      const m = mapping(P);
+      if (!d.b || Math.abs(d.b[0] - d.pts[0][0]) * m.s < 4 || Math.abs(d.b[1] - d.pts[0][1]) * m.s < 4) { redraw(); toast('Drag to draw a rectangle.'); return; }
+      finishDrawing('rect', P, { type: 'Polygon', px: simplify(rectPts(d.pts[0], d.b)) }, d.sel); return;
+    }
+    if (d.pts.length < 3) { redraw(); toast('Trace a closed shape: hold the button and draw around the area.'); return; }
+    finishDrawing(d.kind, P, { type: 'Polygon', px: simplify(d.pts) }, d.sel);
   }, true);
+  P.el.addEventListener('pointerleave', () => { if (S.hover?.P === P) { S.hover = null; redraw(true); } });
+  P.el.addEventListener('dblclick', e => { if (S.mode !== 'pan') { e.stopPropagation(); e.preventDefault(); } }, true);
   P.el.addEventListener('contextmenu', e => {
     if (e.target.closest('.ph')) return;
     e.preventDefault(); e.stopPropagation();
     const [sx, sy] = pos(e); contextMenu(P, hits(P, sx, sy), e.clientX, e.clientY);
   }, true);
+}
+
+function finishPoly() {
+  const d = S.draw; S.draw = null;
+  if (!d || d.pts.length < 3) { redraw(); toast('A polygon needs at least three corners.'); return; }
+  finishDrawing('poly', d.P, { type: 'Polygon', px: simplify(d.pts) }, d.sel);
 }
 
 function simplify(pts) {
@@ -354,26 +520,21 @@ function simplify(pts) {
   return out.map(p => [Math.round(p[0] * 10) / 10, Math.round(p[1] * 10) / 10]);
 }
 
-function finishDrawing(kind, P, geom) {
+function finishDrawing(kind, P, geom, sel = 'replace') {
   if (kind === 'pin' || kind === 'area') commentDialog({ geometry: geom });
   else if (kind === 'annot') annotationDialog({ geometry: geom });
-  else setRegion(geom.px, P.k);
+  else selectPolygon(geom.px, P, sel);
   if (S.oneShot) setMode('pan');
   redraw();
 }
 
 function panClick(P, pos) {
   const h = hits(P, pos.x, pos.y);
-  if (S.region && !h.region) clearRegion();            // click outside the region drops it
-  if (h.comment >= 0 && !h.region) { commentDialog(S.comments[h.comment]); return; }
+  if (S.selList.length && !h.inSel) deselect();        // click outside the selection drops it
+  if (h.comment >= 0 && !h.inSel) { commentDialog(S.comments[h.comment]); return; }
   S.sel = h.cell; redraw();
   if (S.sel == null) { $('#cellBox').hidden = true; return; }
   api('/api/cell/' + S.sel).then(showCell).catch(fail);
-}
-
-function clearSelection(withToast = true) {
-  clearRegion(); S.sel = null; S.draw = null; $('#cellBox').hidden = true; closeMenu(); redraw();
-  if (withToast) toast('Selection cleared');
 }
 
 // ---------------------------------------------------------------- cell inspector
@@ -395,64 +556,100 @@ function showCell(c) {
   $('#cellComment').onclick = () => commentDialog({ geometry: { type: 'Point', px: [[S.cells.px[c.index], S.cells.py[c.index]]] }, cell_id: c.cell_id });
 }
 
-// ---------------------------------------------------------------- region: popover by the region, details in the side pane
-function setRegion(px, panelK) {
-  S.region = px; S.regionPanel = panelK; S.regionFilter = null; S.regionUsed = false; S.regionInfo = null; S.regionClasses = null;
-  showTab('edit'); refreshRegion();
+// ---------------------------------------------------------------- selection: a set of cells, Shift adds, Alt subtracts
+function selectPolygon(px, P, sel = 'replace') {
+  const cells = cellsInPoly(px);
+  if (!cells.length && sel !== 'sub') toast('No cells inside that shape.');
+  applySel(sel, cells, { type: 'Polygon', px }, P);
 }
-function clearRegion() { S.region = null; S.regionInfo = null; S.regionFilter = null; $('#pop').hidden = true; renderEdit(); redraw(); }
-
-async function refreshRegion() {
-  if (!S.region) return;
-  try { S.regionInfo = await api('/api/region', { body: { polygon: S.region, filter: S.regionFilter } }); }
-  catch (e) { fail(e); S.regionInfo = null; }
-  // the "limit to" choices always come from the unfiltered region
-  if (S.regionInfo && S.regionFilter == null) S.regionClasses = S.regionInfo.composition.corrected;
-  renderPopover(); renderEdit();
+function applySel(sel, cells, geom, P) {
+  if (sel === 'replace') { S.mask.fill(0); S.selGeoms = []; S.selUsed = false; }
+  const v = sel === 'sub' ? 0 : 1;
+  for (const i of cells) S.mask[i] = v;
+  if (geom) S.selGeoms.push({ ...geom, mode: sel === 'sub' ? 'sub' : 'add' });
+  let n = 0; for (let i = 0; i < S.mask.length; i++) n += S.mask[i];
+  if (!n) { deselect(); return; }
+  const list = new Int32Array(n); let j = 0, x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  const { px, py } = S.cells;
+  for (let i = 0; i < S.mask.length; i++) if (S.mask[i]) { list[j++] = i; if (px[i] < x0) x0 = px[i]; if (px[i] > x1) x1 = px[i]; if (py[i] < y0) y0 = py[i]; if (py[i] > y1) y1 = py[i]; }
+  S.selList = list; S.selBox = [x0, y0, x1, y1]; if (P) S.selPanel = P.k;
+  selInfo(); resetTicks(); showTab('edit'); renderPopover(); renderEdit(); redraw();
 }
-
-const compCount = (comp, k, c) => (comp[k].find(x => x[0] === c) || [0, 0])[1];
-function sameAsNow(comp, k, n) { let a = 0; for (const [c, cnt] of comp.corrected) a += Math.min(cnt, compCount(comp, k, c)); return n ? Math.round(100 * a / n) : 0; }
+function deselect() {
+  if (S.mask) S.mask.fill(0);
+  S.selList = new Int32Array(0); S.selGeoms = []; S.selInfo = null; S.selUsed = false; S.sel = null; S.draw = null;
+  $('#cellBox').hidden = true; $('#pop').hidden = true; closeMenu(); renderEdit(); redraw();
+}
+const rootOf = c => c === 255 ? 255 : S.root[c];
+function selInfo() {
+  const comp = {}, secs = new Map();
+  for (const [r] of REFS()) {
+    const a = refArray(r), c = new Map();
+    for (const i of S.selList) { const v = rootOf(a[i]); c.set(v, (c.get(v) || 0) + 1); }
+    comp[r] = [...c].sort((x, y) => y[1] - x[1]);
+  }
+  for (const i of S.selList) { const s = S.secBoxes[S.cells.sec[i]].name; secs.set(s, (secs.get(s) || 0) + 1); }
+  let same = {}; for (const k of SRC) { const a = refArray(k); let n = 0; for (const i of S.selList) if (a[i] !== 255 && S.root[a[i]] === S.root[S.final[i]]) n++; same[k] = Math.round(100 * n / S.selList.length); }
+  S.selInfo = { n: S.selList.length, comp, sections: [...secs.keys()], same };
+}
+function resetTicks() { const top = S.selInfo.comp[S.ref][0]; S.ticked = new Set(top ? [top[0]] : []); }
+function tickedCells() {
+  const a = refArray(S.ref), out = [];
+  for (const i of S.selList) if (S.ticked.has(rootOf(a[i]))) out.push(i);
+  return out;
+}
+const selGeomsOut = () => S.selGeoms.map(g => ({ mode: g.mode, type: g.type, px: g.px, r_px: g.r_px }));
+const selOutline = () => S.selGeoms.length === 1 && S.selGeoms[0].type === 'Polygon' ? S.selGeoms[0].px : hull(S.selList);
+function quickList() {      // labels on the number keys: recent targets first, then the vocabulary order
+  const roots = S.vocab.filter(v => v.merged_into == null).map(v => v.code);
+  return [...new Set([...S.recent.filter(c => roots.includes(c)), ...roots])].slice(0, 9);
+}
 
 function renderPopover() {
-  const pop = $('#pop'), info = S.regionInfo;
-  if (!S.region || !info) { pop.hidden = true; return; }
-  const devSecs = Object.keys(info.sections).filter(s => S.manifest.splits.dev.includes(s));
-  const filt = S.regionClasses || info.composition.corrected;
-  pop.innerHTML = `<div class="ph2"><b>${fmt(info.n)} cells</b> <span>${Object.keys(info.sections).join(', ')}</span>
-      <button class="x" data-a="discard" title="${S.regionUsed ? 'Done' : 'Discard region'}">×</button></div>
+  const pop = $('#pop'), info = S.selInfo;
+  if (!info || !S.selList.length) { pop.hidden = true; return; }
+  const devSecs = info.sections.filter(s => S.manifest.splits.dev.includes(s));
+  const dom = k => { const t = info.comp[k][0]; return `${shortName(k)} ${Math.round(100 * t[1] / info.n)}% ${esc(nameOf(t[0]))}`; };
+  const classes = info.comp[S.ref], nTick = tickedCells().length, quick = quickList();
+  pop.innerHTML = `<div class="ph2"><b>${nCells(info.n)}</b> <span>${info.sections.join(', ')}</span>
+      <button class="x" data-a="discard" title="Deselect (Esc)">×</button></div>
+    <div class="compline" id="selComp">${fmt(info.n)} cells: ${SRC.map(dom).join(' · ')}</div>
     ${devSecs.length ? `<div class="warnbox">Dev section ${devSecs.join(', ')}: Vestrum is in-sample here.</div>` : ''}
     <div class="lbl">Use labels from <span class="hint">→ ${esc(layerName())}</span></div>
     <div class="basebtns">${S.manifest.sources.map(s => `<button class="btn base" data-base="${s.key}" style="--bc:${BASECOL[s.key]}">
-      <span><i class="dot"></i>${esc(s.name)}</span><span class="mono">${sameAsNow(info.composition, s.key, info.n)}% same as yours</span></button>`).join('')}</div>
-    <div class="lbl">Limit to</div>
-    <select data-a="filter"><option value="">all cells in the region</option>${filt.map(([c, n]) => `<option value="${c}" ${S.regionFilter === c ? 'selected' : ''}>only cells you have as ${esc(nameOf(c))} (${fmt(n)})</option>`).join('')}</select>
-    <div class="row"><select data-a="to">${labelOptions()}</select><button class="btn" data-a="relabel">Relabel ${fmt(info.n)}</button></div>
-    <div class="row"><button class="btn small" data-a="comment">Comment on region</button><button class="btn small" data-a="discard">${S.regionUsed ? 'Done' : 'Discard'}</button></div>`;
+      <span><i class="dot"></i>${esc(s.name)}</span><span class="mono">${info.same[s.key]}% same as yours</span></button>`).join('')}</div>
+    <div class="lbl">Relabel only the ticked classes, as labelled by <select data-a="ref" class="inl">${REFS().map(([k, n]) => `<option value="${k}" ${S.ref === k ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select></div>
+    <div class="classes">${classes.map(([c, n]) => `<label><input type="checkbox" data-c="${c}" ${S.ticked.has(c) ? 'checked' : ''}><span class="sw" style="background:${c === 255 ? '#b9bec5' : S.colour[c]}"></span>${esc(nameOf(c))} <span class="mono">${fmt(n)}</span></label>`).join('')}</div>
+    <div class="row"><select data-a="to"><option value="">new label…</option>${labelOptions(S.target)}</select><button class="btn primary" data-a="relabel" ${nTick ? '' : 'disabled'}>Relabel ${fmt(nTick)}</button></div>
+    <div class="quick">${quick.map((c, k) => `<button class="qk ${S.target === c ? 'on' : ''}" data-q="${c}" title="Press ${k + 1}"><kbd>${k + 1}</kbd>${esc(nameOf(c))}</button>`).join('')}</div>
+    <div class="row"><button class="btn small" data-a="comment">Comment here</button><span class="hint" style="margin:0">Enter relabels · Esc deselects · Shift adds · Alt subtracts</span></div>`;
   pop.hidden = false;
-  pop.querySelectorAll('[data-base]').forEach(b => b.onclick = () => applyOp({ op: 'base', source: b.dataset.base }));
-  pop.querySelector('[data-a=filter]').onchange = e => { S.regionFilter = e.target.value === '' ? null : +e.target.value; refreshRegion(); };
-  pop.querySelector('[data-a=relabel]').onclick = () => relabelPick(+pop.querySelector('[data-a=to]').value);
-  pop.querySelector('[data-a=comment]').onclick = () => commentDialog({ geometry: { type: 'Polygon', px: S.region } });
-  pop.querySelectorAll('[data-a=discard]').forEach(b => b.onclick = clearRegion);
+  pop.querySelectorAll('[data-base]').forEach(b => b.onclick = () => baseSel(b.dataset.base));
+  pop.querySelector('[data-a=ref]').onchange = e => { S.ref = e.target.value; resetTicks(); renderPopover(); };
+  pop.querySelectorAll('[data-c]').forEach(b => b.onchange = e => { const c = +b.dataset.c; e.target.checked ? S.ticked.add(c) : S.ticked.delete(c); e.target.blur(); const n = tickedCells().length, r = pop.querySelector('[data-a=relabel]'); r.textContent = 'Relabel ' + fmt(n); r.disabled = !n; });
+  pop.querySelector('[data-a=to]').onchange = e => { S.target = e.target.value === '' ? null : +e.target.value; e.target.blur(); renderPopover(); };
+  pop.querySelectorAll('[data-q]').forEach(b => b.onclick = () => { S.target = +b.dataset.q; renderPopover(); });
+  pop.querySelector('[data-a=relabel]').onclick = relabelSel;
+  pop.querySelector('[data-a=comment]').onclick = () => commentDialog({ geometry: { type: 'Polygon', px: selOutline() } });
+  pop.querySelector('[data-a=discard]').onclick = deselect;
   placePopover();
 }
 
 function placePopover() {
-  const pop = $('#pop'); if (pop.hidden || !S.region) return;
-  const P = S.panels[S.regionPanel], m = mapping(P); if (!m) return;
+  const pop = $('#pop'); if (pop.hidden || !S.selBox) return;
+  const P = S.panels[S.selPanel], m = mapping(P); if (!m) return;
   const pr = P.el.getBoundingClientRect(), gr = $('#grid').getBoundingClientRect();
-  const xs = S.region.map(p => m.toS(p[0], p[1])[0]), ys = S.region.map(p => m.toS(p[0], p[1])[1]);
+  const [ax, ay] = m.toS(S.selBox[0], S.selBox[1]), [bx] = m.toS(S.selBox[2], S.selBox[3]);
   const w = pop.offsetWidth, h = pop.offsetHeight;
-  let x = pr.left - gr.left + Math.max(...xs) + 12, y = pr.top - gr.top + Math.min(...ys);
-  if (x + w > gr.width - 4) x = pr.left - gr.left + Math.min(...xs) - w - 12;
+  let x = pr.left - gr.left + bx + 12, y = pr.top - gr.top + ay;
+  if (x + w > gr.width - 4) x = pr.left - gr.left + ax - w - 12;
   x = Math.max(4, Math.min(gr.width - w - 4, x)); y = Math.max(4, Math.min(gr.height - h - 4, y));
   pop.style.left = x + 'px'; pop.style.top = y + 'px';
 }
 
 function labelOptions(selected) {
   return S.vocab.filter(v => v.merged_into == null).map(v => `<option value="${v.code}" ${v.code === selected ? 'selected' : ''}>${esc(v.name)}</option>`).join('')
-    + '<option value="-1">+ new label…</option>';
+    + `<option value="-1" ${selected === -1 ? 'selected' : ''}>+ new label…</option>`;
 }
 async function ensureLabel(code) {      // "+ new label…" creates it first
   if (code !== -1) return code;
@@ -460,44 +657,62 @@ async function ensureLabel(code) {      // "+ new label…" creates it first
   const r = await api('/api/vocab', { body: { action: { action: 'add', name: n.trim() } } });
   setVocab(r.vocab); renderAll(); return codeOfName(n.trim());
 }
-async function relabelPick(code) {
-  try { const c = await ensureLabel(code); if (c != null) applyOp({ op: 'relabel', to: c }); } catch (e) { fail(e); }
+
+function baseSel(source) { return applyOp({ op: 'base', source, cells: Array.from(S.selList), geoms: selGeomsOut() }); }
+async function relabelSel() {
+  if (!S.selList.length) return;
+  if (S.target == null) { toast('Choose the new label first (number keys 1–9 or the list).'); return; }
+  const cells = tickedCells();
+  if (!cells.length) { toast('Tick at least one class to relabel.'); return; }
+  try {
+    const to = await ensureLabel(S.target); if (to == null) return;
+    S.target = to; S.recent = [to, ...S.recent.filter(c => c !== to)].slice(0, 4);
+    await applyOp({ op: 'relabel', to, cells, geoms: selGeomsOut(), filter_ref: S.ref, filter_classes: [...S.ticked] });
+  } catch (e) { fail(e); }
 }
 
 function renderEdit() {
   const pane = $('#editPane');
-  if (!S.region || !S.regionInfo) {
+  if (!S.selInfo) {
     pane.innerHTML = `<h3>Build ${esc(layerName())}</h3>
       <ol class="steps">
-        <li><b>Draw a region:</b> <kbd>Shift</kbd>+drag on any panel (or right-click → Draw region here, or the Draw region tool).</li>
-        <li><b>Pick the labels to start from:</b> in the box by the region, choose the method that looks most accurate.
-          Or right-click inside the region on that method's panel → <i>Use this panel's labels here</i>.</li>
-        <li><b>Fix on top:</b> relabel the region, or only the cells you have as one class.</li>
+        <li><b>Start a section:</b> on the ${esc(layerName())} panel, pick the method to start from (the start card), or <i>Restart from…</i> later.</li>
+        <li><b>Select cells:</b> Lasso <kbd>L</kbd>, Polygon <kbd>P</kbd> (click corners, double-click or Enter closes), Rectangle <kbd>R</kbd>,
+          Brush <kbd>B</kbd> (<kbd>[</kbd> <kbd>]</kbd> size), Cell <kbd>S</kbd>. <kbd>Shift</kbd> adds, <kbd>Alt</kbd> subtracts. In Pan <kbd>V</kbd>, <kbd>Shift</kbd>+drag lassos.</li>
+        <li><b>Fix:</b> in the box by the selection, use another method's labels for those cells, or relabel only the ticked classes.
+          <kbd>1</kbd>–<kbd>9</kbd> choose the new label, <kbd>Enter</kbd> applies, <kbd>Esc</kbd> deselects.</li>
       </ol>
-      <p class="hint">Every choice lands in <b>${esc(layerName())}</b> (its own panel, next to the slide), whichever panel you drew on. Outlines there show the method you picked:
+      <p class="hint">Every choice lands in <b>${esc(layerName())}</b>, whichever panel you drew on. Outlines there show the method you picked:
         ${S.manifest.sources.map(s => `<span class="keychip" style="--bc:${BASECOL[s.key]}">${esc(s.name)}</span>`).join(' ')} <span class="keychip" style="--bc:${BASECOL.relabel}">relabel</span></p>
       <p class="hint">Cells you never touch keep the Bill_eugene_code label (saved as <span class="mono">bill_eugene_code-default</span>).
-        A region you draw and do not use disappears when you click elsewhere or press Esc.</p>`;
+        <b>Clear</b> on the ${esc(layerName())} panel empties a section again (undoable).</p>`;
     return;
   }
-  const info = S.regionInfo, comp = info.composition;
+  const info = S.selInfo, comp = info.comp, cnt = (k, c) => (comp[k].find(x => x[0] === c) || [0, 0])[1];
   const codes = new Set(); Object.values(comp).forEach(list => list.slice(0, 10).forEach(([c]) => codes.add(c)));
-  const rows = [...codes].sort((a, b) => compCount(comp, 'corrected', b) - compCount(comp, 'corrected', a)).map(c => `<tr><td><span class="sw" style="background:${c < 0 ? '#b9bec5' : S.colour[c]}"></span> ${esc(nameOf(c))}</td>
-    <td><b>${fmt(compCount(comp, 'corrected', c))}</b></td><td>${fmt(compCount(comp, 'bill_eugene_code', c))}</td><td>${fmt(compCount(comp, 'vestrum', c))}</td><td>${fmt(compCount(comp, 'claude_code', c))}</td></tr>`).join('');
-  pane.innerHTML = `<h3>Region · ${fmt(info.n)} cells${S.regionFilter != null ? ` (only ${esc(nameOf(S.regionFilter))})` : ''}</h3>
-    <p class="hint">Choose and relabel in the box next to the region. Counts per label:</p>
-    <table class="comp"><tr><th>Label</th><th>Yours</th><th>Bill_e.</th><th>Vestrum</th><th>Claude</th></tr>${rows}</table>`;
+  const rows = [...codes].sort((a, b) => cnt('corr', b) - cnt('corr', a)).map(c => `<tr><td><span class="sw" style="background:${c === 255 ? '#b9bec5' : S.colour[c]}"></span> ${esc(nameOf(c))}</td>
+    <td><b>${fmt(cnt('corr', c))}</b></td>${SRC.map(k => `<td>${fmt(cnt(k, c))}</td>`).join('')}</tr>`).join('');
+  pane.innerHTML = `<h3>Selection · ${nCells(info.n)}</h3>
+    <p class="hint">Choose and relabel in the box next to the selection. Counts per label:</p>
+    <table class="comp"><tr><th>Label</th><th>Yours</th>${SRC.map(k => `<th>${esc(shortName(k))}</th>`).join('')}</tr>${rows}</table>`;
 }
 
-async function applyOp(body) {
+async function applyOp(body, scoped = false) {
+  if (applyOp.busy) return;                  // a double click sends one op
+  applyOp.busy = true;
   try {
-    const op = await api('/api/ops', { body: { ...body, polygon: body.cells ? undefined : S.region, filter: body.cells ? undefined : S.regionFilter } });
+    const op = await api('/api/ops', { body });
     S.ops.push(op); await loadFinal();
-    toast(op.op === 'base' ? `${layerName()}: ${sourceName(op.source)} labels copied into ${nCells(op.n)}` : `${layerName()}: ${nCells(op.n)} relabelled to ${op.to_name}`);
-    if (!body.cells) { S.regionUsed = true; S.regionFilter = null; await refreshRegion(); }
-    else if (S.sel != null) api('/api/cell/' + S.sel).then(showCell).catch(fail);
+    const where = op.scope === 'all' ? 'all sections' : (op.sections || []).join(', ');
+    toast(op.op === 'clear' ? `${layerName()} cleared for ${where} — Undo (Ctrl+Z) brings it back`
+      : op.op === 'base' ? `${layerName()}: ${sourceName(op.source)} labels for ${scoped ? where : nCells(op.n)}`
+      : `${layerName()}: ${nCells(op.n)} relabelled to ${op.to_name}`);
+    if (S.selList.length && !scoped) { S.selUsed = true; selInfo(); resetTicks(); }
+    else if (S.selList.length) selInfo();
+    if (S.sel != null) api('/api/cell/' + S.sel).then(showCell).catch(fail);
     renderAll();
-  } catch (e) { fail(e); }
+    return op;
+  } catch (e) { fail(e); } finally { applyOp.busy = false; }
 }
 
 async function undo(target) {
@@ -505,24 +720,27 @@ async function undo(target) {
     const r = await api('/api/undo', { body: target ? { target } : {} });
     if (!r.undone) { toast('Nothing to undo'); return; }
     S.ops = S.ops.filter(o => o.id !== r.undone.id); await loadFinal();
-    toast('Undid: ' + opText(r.undone)); if (S.region) await refreshRegion(); renderAll();
+    toast('Undid: ' + opText(r.undone)); if (S.selList.length) selInfo(); renderAll();
   } catch (e) { fail(e); }
 }
-const opText = o => o.op === 'base' ? `${sourceName(o.source)} labels · ${nCells(o.n)}` : `relabel → ${o.to_name} · ${nCells(o.n)}`;
+const opText = o => {
+  const where = o.scope === 'all' ? 'all sections' : (o.sections || []).join(', ');
+  if (o.op === 'clear') return `clear · ${where}`;
+  if (o.op === 'base') return `${sourceName(o.source)} labels · ${o.scope ? where : nCells(o.n)}`;
+  return `relabel → ${o.to_name} · ${nCells(o.n)}`;
+};
 
-// ---------------------------------------------------------------- right-click menu
+// ---------------------------------------------------------------- right-click and header menus
 function contextMenu(P, h, cx, cy) {
   const items = [];
   const add = (label, fn, cls = '') => items.push({ label, fn, cls });
   const sep = title => items.push({ sep: true, title });
-  if (h.region) {
-    sep(`Region · ${S.regionInfo ? fmt(S.regionInfo.n) + ' cells' : ''}`);
+  if (h.inSel) {
+    sep(`Selection · ${nCells(S.selList.length)}`);
     const own = typeof P.layer === 'number' ? SRC[P.layer] : null;   // a method panel
-    if (own) add(`Use this panel's labels here (${sourceName(own)})`, () => applyOp({ op: 'base', source: own }), 'strong');
-    for (const k of SRC) if (k !== own) add(`Use ${sourceName(k)} labels here`, () => applyOp({ op: 'base', source: k }));
-    add('Relabel region…', () => relabelDialog({ region: true }));
-    add('Comment on region', () => commentDialog({ geometry: { type: 'Polygon', px: S.region } }));
-    add(S.regionUsed ? 'Done with region' : 'Discard region', clearRegion);
+    if (own) add(`Use this panel's labels here (${sourceName(own)})`, () => baseSel(own), 'strong');
+    for (const k of SRC) if (k !== own) add(`Use ${sourceName(k)} labels here`, () => baseSel(k));
+    add('Comment on the selection', () => commentDialog({ geometry: { type: 'Polygon', px: selOutline() } }));
   }
   if (h.comment >= 0) {
     const c = S.comments[h.comment];
@@ -536,23 +754,25 @@ function contextMenu(P, h, cx, cy) {
     add('Rename annotation', () => annotationDialog(a));
     add('Delete annotation', () => deleteItem('annotations', a), 'danger');
   }
-  if (h.op && !h.region) {
+  if (h.op && !h.inSel) {
     sep(`Edit · ${opText(h.op)}`);
-    add('Select this region again', () => { setRegion(h.op.geometry.px, P.k); });
+    add('Select this region again', () => selectPolygon(h.op.geometry.px, P));
     add('Undo this edit', () => undo(h.op.id), 'danger');
   }
   if (h.cell != null) {
     sep('Cell');
     add('Show its labels', () => { S.sel = h.cell; redraw(); api('/api/cell/' + h.cell).then(showCell).catch(fail); });
+    add('Select this cell', () => applySel('replace', [h.cell], { type: 'Point', px: [[S.cells.px[h.cell], S.cells.py[h.cell]]] }, P));
     add('Relabel this cell…', () => relabelDialog({ cells: [h.cell] }));
     add('Comment on this cell', () => commentDialog({ geometry: { type: 'Point', px: [[S.cells.px[h.cell], S.cells.py[h.cell]]] } }));
   }
   sep('Here');
-  add('Draw region here', () => { setMode('edit', true); toast('Drag to draw the region'); });
+  add('Lasso a region here', () => { setMode('lasso', true); toast('Drag to lasso the cells'); });
   add('Comment here', () => commentDialog({ geometry: { type: 'Point', px: [h.pt] } }));
   add('Annotate here', () => { setMode('annot', true); toast('Drag to draw the annotation'); });
-  if (S.region || S.sel != null) add('Clear selection', () => clearSelection());
-
+  showMenu(items, cx, cy);
+}
+function showMenu(items, cx, cy) {
   const menu = $('#ctx'); menu.innerHTML = '';
   for (const it of items) {
     if (it.sep) { menu.append(el('div', 'msep', esc(it.title))); continue; }
@@ -575,18 +795,14 @@ function dialog(html, onSubmit) {
   d.showModal(); f.querySelector('textarea,input[type=text]')?.focus();
 }
 
-function relabelDialog({ region, cells }) {
-  const info = S.regionInfo;
-  dialog(`<h3>Relabel ${cells ? 'this cell' : `the region (${fmt(info?.n || 0)} cells)`}</h3>
+function relabelDialog({ cells }) {
+  dialog(`<h3>Relabel this cell</h3>
     <p class="hint">Changes ${esc(layerName())} only. The three methods stay as they are.</p>
-    ${region && info ? `<label>Limit to</label><select name="filter"><option value="">all cells in the region</option>
-      ${(S.regionClasses || info.composition.corrected).map(([c, n]) => `<option value="${c}" ${S.regionFilter === c ? 'selected' : ''}>only cells you have as ${esc(nameOf(c))} (${fmt(n)})</option>`).join('')}</select>` : ''}
     <label>New label</label><select name="to">${labelOptions()}</select>
     <div class="acts"><button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn primary">Relabel</button></div>`,
   async fd => {
     const to = await ensureLabel(+fd.get('to')); if (to == null) return false;
-    if (cells) await applyOp({ op: 'relabel', to, cells });
-    else { const f = fd.get('filter'); S.regionFilter = f ? +f : null; await applyOp({ op: 'relabel', to }); }
+    await applyOp({ op: 'relabel', to, cells });
   });
 }
 
@@ -690,7 +906,7 @@ function showTab(t) {
 function renderComments() {
   const pane = $('#commentsPane');
   $('#nComments').textContent = S.comments.length || '';
-  if (!S.comments.length) { pane.innerHTML = '<p class="hint">No comments yet. Right-click → <b>Comment here</b>, or use <b>Comment point</b> (C) / <b>Comment area</b> (R).</p>'; return; }
+  if (!S.comments.length) { pane.innerHTML = '<p class="hint">No comments yet. Right-click → <b>Comment here</b>, or use <b>Comment</b> (C) / <b>Area</b> (M).</p>'; return; }
   pane.innerHTML = '<div class="list"></div>';
   const T = Object.fromEntries(TARGETS());
   S.comments.forEach((c, k) => {
@@ -728,7 +944,7 @@ function renderLabels() {
       <td><select><option value="">${v.merged_into == null ? 'merge into…' : 'unmerge'}</option>${roots.filter(r => r.code !== v.code).map(r => `<option value="${r.code}" ${v.merged_into === r.code ? 'selected' : ''}>→ ${esc(r.name)}</option>`).join('')}</select></td>
       <td class="n">${v.merged_into == null ? fmt(counts.get(v.code) || 0) : ''}</td></tr>`).join('')}</table>
     <div class="row"><input type="text" id="newLabel" placeholder="New label name" class="inp"><button class="btn" id="addLabel">Add</button></div>`;
-  const act = async a => { try { const r = await api('/api/vocab', { body: { action: a } }); setVocab(r.vocab); renderAll(); if (S.region) refreshRegion(); } catch (e) { fail(e); } };
+  const act = async a => { try { const r = await api('/api/vocab', { body: { action: a } }); setVocab(r.vocab); if (S.selList.length) selInfo(); renderAll(); } catch (e) { fail(e); } };
   pane.querySelectorAll('tr[data-c]').forEach(tr => {
     const code = +tr.dataset.c;
     tr.querySelector('input[type=color]').onchange = e => act({ action: 'recolor', code, color: e.target.value });
@@ -748,10 +964,10 @@ function renderLog() {
     <hr class="hr"><button class="btn danger" id="resetBtn">Reset to initial…</button>
     <p class="hint">Removes every edit, comment, annotation and label change of ${esc(S.reviewer)}. The session is archived, not deleted.</p>`;
   [...S.ops].reverse().forEach(o => {
-    const it = el('div', 'item', `<div class="meta"><span class="keychip" style="--bc:${opColour(o)}">${o.op === 'base' ? 'picked' : 'relabel'}</span><span>${esc(opText(o))}</span>
-      ${o.filter_name ? `<span class="tag">only ${esc(o.filter_name)}</span>` : ''}<span>${esc(o.ts?.slice(11, 16))}</span></div>
-      <div class="acts"><button class="btn small" data-a="sel">Select region</button><button class="btn small danger" data-a="undo">Undo</button></div>`);
-    it.onclick = e => { const a = e.target.dataset.a; if (a === 'undo') undo(o.id); else if (a === 'sel') { flyTo(o.geometry.px); setRegion(o.geometry.px, 0); } else flyTo(o.geometry.px); };
+    const it = el('div', 'item', `<div class="meta"><span class="keychip" style="--bc:${opColour(o)}">${o.op === 'base' ? (o.scope ? 'start' : 'picked') : o.op}</span><span>${esc(opText(o))}</span>
+      ${o.filter_name ? `<span class="tag">only ${esc(o.filter_name)}</span>` : ''}${o.filter_names ? `<span class="tag">only ${esc(o.filter_names.join(', '))} (${esc(o.filter_ref === 'corr' ? 'yours' : shortName(o.filter_ref))})</span>` : ''}<span>${esc(o.ts?.slice(11, 16))}</span></div>
+      <div class="acts">${o.scope ? '' : '<button class="btn small" data-a="sel">Select region</button>'}<button class="btn small danger" data-a="undo">Undo</button></div>`);
+    it.onclick = e => { const a = e.target.dataset.a; if (a === 'undo') undo(o.id); else if (a === 'sel') { flyTo(o.geometry.px); selectPolygon(o.geometry.px, S.panels[1]); } else if (!o.scope) flyTo(o.geometry.px); };
     pane.querySelector('.list').append(it);
   });
   $('#resetBtn').onclick = resetDialog;
@@ -769,30 +985,47 @@ function renderLegend() {
   L.append(nl);
 }
 
-function renderAll() { renderEdit(); renderComments(); renderAnnots(); renderLabels(); renderLog(); renderLegend(); if (S.region && S.regionInfo) renderPopover(); redraw(); }
+function renderAll() { renderEdit(); renderComments(); renderAnnots(); renderLabels(); renderLog(); renderLegend(); if (S.selInfo) renderPopover(); redraw(); }
 
 // ---------------------------------------------------------------- wiring
-document.querySelectorAll('#modes button').forEach(b => b.onclick = () => setMode(b.dataset.mode));
+document.querySelectorAll('#modes button, #modes2 button').forEach(b => b.onclick = () => setMode(b.dataset.mode));
 document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => showTab(b.dataset.tab));
 $('#disagree').onchange = e => { S.disagree = e.target.checked; redraw(); };
 $('#showOps').onchange = e => { S.showOps = e.target.checked; redraw(); };
 $('#dotSize').oninput = e => { S.dot = +e.target.value; redraw(); };
 $('#wash').oninput = e => { S.wash = +e.target.value; redraw(); };
-$('#secJump').onchange = e => { if (e.target.value === '') { S.panels[0].viewer.viewport.goHome(); return; } const b = S.secBoxes[+e.target.value]; fitImageRect(b.x0, b.y0, b.x1, b.y1); };
+$('#secJump').onchange = e => { e.target.blur(); if (e.target.value === '') { S.panels[0].viewer.viewport.goHome(); return; } const b = S.secBoxes[+e.target.value]; fitImageRect(b.x0, b.y0, b.x1, b.y1); };
 $('#undoBtn').onclick = () => undo();
-$('#clearBtn').onclick = () => clearSelection();
 $('#saveBtn').onclick = saveDialog;
 $('#reviewerBtn').onclick = () => reviewerDialog(false);
+// holding Shift / Alt (to add / subtract) fades the popover so it never blocks the next stroke
+const ghost = e => $('#pop').classList.toggle('ghost', e.shiftKey || e.altKey);
+window.addEventListener('keydown', ghost); window.addEventListener('keyup', ghost); window.addEventListener('blur', () => $('#pop').classList.remove('ghost'));
 window.addEventListener('keydown', e => {
-  if (/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) || $('#dlg').open) return;
+  const a = document.activeElement;
+  if ((a.tagName === 'INPUT' && !/checkbox|range|radio/.test(a.type)) || /TEXTAREA|SELECT/.test(a.tagName) || $('#dlg').open) return;
   const k = e.key.toLowerCase();
   if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); undo(); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
-  const modes = { v: 'pan', c: 'pin', r: 'area', e: 'edit', a: 'annot' };
+  const modes = { v: 'pan', l: 'lasso', e: 'lasso', p: 'poly', r: 'rect', b: 'brush', s: 'cell', c: 'pin', m: 'area', a: 'annot' };
   if (modes[k]) setMode(modes[k]);
   else if (k === 'd') { const c = $('#disagree'); c.checked = !c.checked; c.onchange({ target: c }); }
-  else if (k === 'escape') { closeMenu(); if (S.draw) { S.draw = null; redraw(); } else if (S.mode !== 'pan') setMode('pan'); else clearSelection(false); }
+  else if (k === '[' || k === ']') setBrush(S.brushPx * (k === '[' ? 0.8 : 1.25));
+  else if (/^[1-9]$/.test(k) && S.selInfo) { const c = quickList()[+k - 1]; if (c != null) { S.target = c; renderPopover(); } }
+  else if (k === 'enter') {
+    if (S.draw?.kind === 'poly') { e.preventDefault(); finishPoly(); }
+    else if (S.selInfo) { e.preventDefault(); relabelSel(); }
+  }
+  else if (k === 'escape') {
+    if (!$('#ctx').hidden) closeMenu();
+    else if (S.draw) { S.draw = null; redraw(); }
+    else if (S.selList.length || S.sel != null) deselect();
+    else if (S.mode !== 'pan') setMode('pan');
+  }
 });
+
+// read-only handle for the UI tests: state, and image px -> page coordinates of one panel
+window.PathQC = { S, sectionInView, toClient: (k, x, y) => { const P = S.panels[k], m = mapping(P), r = P.el.getBoundingClientRect(), [sx, sy] = m.toS(x, y); return [r.left + sx, r.top + sy]; } };
 
 let saved = null; try { saved = localStorage.getItem('pathqc.reviewer'); } catch (e) {}
 const urlReviewer = new URLSearchParams(location.search).get('reviewer');

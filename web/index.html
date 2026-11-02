@@ -18,21 +18,26 @@
 
 <div class="toolbar" role="toolbar">
   <div class="seg" id="modes">
-    <button data-mode="pan" class="on" title="Pan and zoom; click a cell to inspect (V)">Pan <kbd>V</kbd></button>
-    <button data-mode="edit" title="Drag to draw a region, then pick labels and relabel (E). Shift+drag does the same in Pan.">Draw region <kbd>E</kbd></button>
-    <button data-mode="pin" title="Click to pin a comment (C)">Comment point <kbd>C</kbd></button>
-    <button data-mode="area" title="Drag to draw an area and comment on it (R)">Comment area <kbd>R</kbd></button>
+    <button data-mode="pan" class="on" title="Pan and zoom; click a cell to inspect (V). Shift+drag lassos, Alt+drag subtracts.">Pan <kbd>V</kbd></button>
+    <button data-mode="lasso" title="Freehand lasso around cells (L)">Lasso <kbd>L</kbd></button>
+    <button data-mode="poly" title="Click the corners; double-click or Enter closes (P)">Polygon <kbd>P</kbd></button>
+    <button data-mode="rect" title="Drag a rectangle (R)">Rect <kbd>R</kbd></button>
+    <button data-mode="brush" title="Paint over cells; [ and ] change the size (B)">Brush <kbd>B</kbd></button>
+    <button data-mode="cell" title="Click single cells (S)">Cell <kbd>S</kbd></button>
+  </div>
+  <span class="ctl" title="Brush radius on screen: [ smaller, ] larger. Any tool: Shift adds to the selection, Alt subtracts, Esc deselects."><b id="brushSize" class="mono">18 px</b> <kbd>[</kbd><kbd>]</kbd></span>
+  <div class="seg" id="modes2">
+    <button data-mode="pin" title="Click to pin a comment (C)">Comment <kbd>C</kbd></button>
+    <button data-mode="area" title="Drag to draw an area and comment on it (M)">Area <kbd>M</kbd></button>
     <button data-mode="annot" title="Drag to draw a named polygon (A)">Annotate <kbd>A</kbd></button>
   </div>
-  <span class="hint" style="margin:0" title="Shift+drag on any panel draws a region; right-click opens the menu"><kbd>Shift</kbd>+drag · right-click</span>
   <span class="sep"></span>
   <label class="ctl">Go to <select id="secJump"></select></label>
   <label class="ctl" title="Hide cells where all three methods give the same label"><input type="checkbox" id="disagree"> Only disagreements <kbd>D</kbd></label>
-  <label class="ctl"><input type="checkbox" id="showOps" checked> Show edit regions</label>
+  <label class="ctl"><input type="checkbox" id="showOps" checked> Edit outlines</label>
   <label class="ctl">Dots <input type="range" id="dotSize" min="0.5" max="2.5" step="0.1" value="1"></label>
   <label class="ctl" title="Fade the slide under the label layers">Fade slide <input type="range" id="wash" min="0" max="0.9" step="0.05" value="0.55"></label>
   <span class="grow"></span>
-  <button class="btn" id="clearBtn" title="Clear the current region and cell selection (Esc)">Clear</button>
   <button class="btn" id="undoBtn" title="Undo last edit (Ctrl+Z)">Undo</button>
 </div>
 
