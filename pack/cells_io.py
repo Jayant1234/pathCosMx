@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pandas as pd
 
-DTYPES = {"cell_id": str, "section": str, "split": str, "bill_eugene_code": str, "vestrum": str, "claude_code": str}
+DTYPES = {"cell_id": str, "section": str, "split": str, "bill_eugene_code": str, "vestrum": str, "claude_code": str,
+          "novae5": str, "novae10": str, "novae20": str}
+STAIN_COLUMNS = ("panck", "cd45", "cd68")
 
 
 def read_cells(pack, columns=None):
@@ -20,6 +22,9 @@ def read_cells(pack, columns=None):
     for k in ("bill_eugene_code", "vestrum", "claude_code"):
         if k in d:
             d[k] = d[k].fillna("")
+    for k in STAIN_COLUMNS:
+        if k in d:
+            d[k] = pd.to_numeric(d[k], errors="coerce")
     return d
 
 

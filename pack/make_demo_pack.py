@@ -17,6 +17,7 @@ import pandas as pd
 
 from cells_io import write_cells
 
+from add_attributes import ATTRIBUTES
 from build_pack import CANON, SOURCES, ari
 
 STROMA = ["CAF1"] * 6 + ["Endoth"] * 2 + ["Tcells"] * 2 + ["TAMs"] * 2 + ["Bcells", "Mast", "Perictye", "DCs"]
@@ -70,9 +71,23 @@ def main():
     c[rng.random(len(c)) < 0.02] = ""                                               # a few unlabelled
     d["vestrum"], d["claude_code"] = v, c
 
+    # synthetic stains and spatial domains for the assisted selection tools
+    t = d.truth.values
+    epi = np.isin(t, ["Keratin", "Squam1", "Squam2", "Squam3", "Basal(core)", "Basal(stem)", "Basal(ifn)"])
+    imm = np.isin(t, ["Tcells", "Bcells", "TAMs", "DCs", "Mast"])
+    lognorm = lambda mu, n: np.round(np.exp(rng.normal(np.log(mu), 0.35, n)), 1)
+    d["panck"] = np.where(epi, lognorm(9000, len(d)), lognorm(1300, len(d)))
+    d["cd45"] = np.where(imm, lognorm(6000, len(d)), lognorm(1500, len(d)))
+    d["cd68"] = np.where(t == "TAMs", lognorm(900, len(d)), lognorm(480, len(d)))
+    dep = d.depth.values
+    d["novae5"] = np.where(dep < 0.2, "D1", np.where(dep < 0.48, "D2", np.where(d.x_mm.values % 4.6 > 2.3, "D3", "D4")))
+    d["novae10"] = d.novae5 + np.where(d.x_mm.values % 2.3 > 1.15, "a", "b")
+    d["novae20"] = d.novae10 + np.where(d.y_mm.values > 1.5, "u", "l")
+
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    cols = ["cell_id", "section", "split", "x_mm", "y_mm", "bill_eugene_code", "vestrum", "claude_code"]
+    cols = ["cell_id", "section", "split", "x_mm", "y_mm", "bill_eugene_code", "vestrum", "claude_code",
+            "panck", "cd45", "cd68", "novae5", "novae10", "novae20"]
     write_cells(d[cols], out)
 
     sources = []
@@ -96,6 +111,7 @@ def main():
         "split_note": "synthetic demo: S1 plays the dev section",
         "sources": sources,
         "vocab": [{"code": i, "name": n, "color": c} for i, (n, c) in enumerate(CANON)],
+        "attributes": ATTRIBUTES,
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
     print(f"wrote {out}: {len(d)} synthetic cells")
