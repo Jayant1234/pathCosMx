@@ -94,24 +94,43 @@ Undoing an earlier edit does not recompute later ones: each edit keeps the cells
 
 | Path | Role |
 |---|---|
-| `run.py` | chooses the pack (user folder → checkout → bundled demo), builds the stand-in on first start, starts the server, opens the browser |
+| `run.py` | chooses the pack (`--pack` → saved in settings → user folder → checkout → bundled demo), builds the stand-in on first start, starts the server, opens the browser |
 | `server/pack.py` | loads a pack; mm ↔ image-px transform; point-in-polygon in slide mm (shapely); binary cell payload |
 | `server/session.py` | per-reviewer state. **Append-only edit log**: corrected label = Bill_eugene_code, then each non-undone op in order (last wins). Geometry is stored in slide mm so work survives the image swap. Vocabulary with merges |
 | `server/app.py` | routes: tiles, `cells.bin`, `final.bin`, `/api/region` (stats), `/api/ops`, `/api/undo`, comments, annotations, vocab, save |
+| `server/shell.py` | start screen + setup API; rebuilds the review app when the pack or image changes; H&E tile route |
+| `server/settings.py`, `server/picker.py` | per-user settings + H&E fingerprint; native file/folder dialog with paste fallback |
+| `server/he.py`, `server/register.py` | H&E reader (OpenSlide, pyvips fallback), DZI tiler, export bands; registration (Pathogene coarse + ECC fine, anchors) |
 | `server/export.py` | results folder; the slide image is painted band by band and streamed to a pyramidal TIFF (memory ≈ one band) |
 | `web/app.js` | five OpenSeadragon viewers on one tile set, leader→follower sync, canvas overlays with a 256-px spatial grid index (only visible cells are drawn), freehand drawing, side panes |
 | `pack/build_pack.py`, `pack/make_standin.py`, `pack/make_demo_pack.py`, `pack/cells_io.py` | pack builder; stand-in image from cell positions only (never labels); synthetic demo pack; cell table I/O |
 | `packaging/` | PyInstaller build script, app requirements, end-to-end smoke test of the built app |
 | `vendor/pathogene/` | the coworker's app, unchanged: registration (`auto_orientation.py`, `register_fine.py`, `register_anchors.py`), `make_dzi.py` |
 
-## When the H&E arrives (not done yet)
+## Start screen and the real H&E
 
-1. Tile it: `vendor/pathogene/backend/make_dzi.py --svs <file> --out packs/<pack>/image_he`.
-2. Register with Pathogene, using `image/standin.tif` as the "CosMx image": it is drawn from the cell
-   positions with a known mm → px transform, so the registration result (stand-in px → H&E px) composes
-   with it into slide mm → H&E px. Auto-orientation + fine registration first; manual anchors if needed.
-3. Write `transform_he.json` (same schema as `transform.json`, `kind: "he"`, per-section matrices allowed)
-   and start with `run.py --image-transform transform_he.json`. Comments, edits and annotations already
-   made on the stand-in move with the cells, because they are stored in slide mm.
-4. Check landmark residuals in µm: that number decides whether single-cell edits are trustworthy
-   (same section) or only region-level ones (serial section).
+The first start opens a **start screen**: your name; the slide pack (the one found is shown as connected;
+*Choose another pack folder…*); **H&E (optional)**: *Locate H&E file…* (SVS, NDPI, MRXS, SCN, pyramidal TIFF:
+whatever OpenSlide reads; plain TIFFs fall back to pyvips) or paste its full path; then **Continue with stand-in**
+or **Continue with H&E → register**. Where no native file dialog exists (headless, over SSH) the paste field is
+the way in; `server/picker.py` has a `provider` hook for a desktop shell's dialog.
+
+Registration (`server/register.py`): **Automatic** runs Pathogene's mask registration (vendored, unchanged:
+16-orientation centroid + grid search of scale/shift on tissue masks) on thumbnails, the CosMx side drawn
+from cell positions, then an OpenCV ECC affine refinement at 1024 and 4096 px. **Anchor points**: click a
+landmark on the H&E, then on the stand-in, ≥ 3 pairs (Pathogene's similarity fit, mirror allowed), optionally
+refined the same way. Check the overlay (cells over the H&E, opacity slider), then **Accept**: the viewer
+opens with the H&E as the slide panel ("H&E") and every overlay mapped through the new transform. Tiles come
+from the H&E file on request (OpenSlide Deep Zoom, LRU cache); Save paints the whole-slide image over the H&E
+at about 1 µm/px (`export.HE_EXPORT_UM`; `max_dim` overrides).
+
+Your choices are kept in `~/Documents/PathQC/settings.json` (reviewer, pack, H&E path + fingerprint =
+size + sha256 of the first 4 MB and last 1 MB, registrations per pack and fingerprint). The accepted transform
+is `<pack>/he/<fingerprint id>/transform.json` (the stand-in's `transform.json` is not touched). Next start goes
+straight to the viewer; **Change slide / H&E** in the header returns to the start screen. If the saved H&E has
+moved or changed, the start screen says so; a re-located file with the same fingerprint reuses its registration.
+
+Registration is one global affine. If sections were cut and mounted separately, per-section matrices
+(`transform["sections"]`, already honoured for cell positions by `server/pack.py`) are the extension.
+Tests without a real H&E: `tests/make_fake_he.py` (known transform), `tests/test_registration.py`,
+`tests/ui_test.py --only B`.

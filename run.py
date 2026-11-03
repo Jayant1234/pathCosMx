@@ -8,6 +8,8 @@
 Packs are looked for in this order: --pack; ~/Documents/PathQC/packs/<name>/ (real data, delivered
 separately); ./packs/<name>/ (developer checkout); the bundled synthetic demo pack.
 Sessions and results are written inside the chosen pack folder.
+The first start shows a start screen (reviewer, pack, optional H&E + registration); the choices are kept in
+~/Documents/PathQC/settings.json, so later starts open the viewer directly (header: "Change slide / H&E").
 """
 import argparse
 import json
@@ -82,8 +84,8 @@ def main():
         _log_to_file()
     pack = choose_pack(args.pack)
     ensure_image(pack)
-    from server.app import create_app
-    app = create_app(pack, args.results, args.image_transform)
+    from server.shell import create_shell     # start screen + settings around the review app
+    app = create_shell(pack, args.results, args.image_transform, pack_from_cli=bool(args.pack), host=args.host)
     port = free_port(args.port)
     url = f"http://{args.host}:{port}/"
     print(f"PathQC on {url}  (pack {pack})", flush=True)

@@ -1,0 +1,22 @@
+/* start screen (web/start.html); builds on app.css tokens */
+body.startpage{overflow:auto}
+.startpage [hidden]{display:none!important}
+.st-main{max-width:1040px;width:100%;margin:0 auto;padding:18px 16px 40px}
+.st-card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:14px 16px;margin-bottom:12px;box-shadow:var(--shadow)}
+.st-card h2{margin:0 0 8px;font-size:14.5px;color:var(--ink);display:flex;align-items:center;gap:8px}
+.st-inp{max-width:520px;font-size:13.5px;padding:6px 8px}
+.st-ok{font-size:12px;font-weight:600;color:var(--good)}
+.st-ok.off{color:var(--muted)}
+.st-actions{display:flex;gap:8px;align-items:center;margin-top:6px}
+.st-tabs{margin-bottom:10px}
+.st-tabs button{flex:0 0 auto;padding:8px 14px}
+.st-pane{display:none}
+.st-pane.on{display:block}
+.st-anchors{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.st-anchors>div{text-align:center}
+.st-anchors canvas{max-width:100%;max-height:60vh;width:auto;height:auto;border:1px solid var(--line);border-radius:6px;background:var(--canvas);cursor:crosshair}
+.st-cap{font-size:12px;font-weight:600;color:var(--muted);margin-bottom:3px}
+#overlay{display:block;margin:0 auto;max-width:100%;max-height:75vh;border:1px solid var(--line);border-radius:6px;background:#fff}
+.st-pair{font-family:var(--mono);font-size:11.5px}
+@media (max-width:700px){.st-anchors{grid-template-columns:1fr}}
+#regWarn{font-size:13px;font-weight:600;border:1px solid var(--warn)}
