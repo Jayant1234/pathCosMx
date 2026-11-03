@@ -161,6 +161,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: packaging/RELEASE_NOTES.md
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v5
         with:
           pattern: PathQC-*
@@ -171,4 +175,5 @@ jobs:
           files: |
             PathQC-*.zip
             PathQC-*.tar.gz
+          body_path: packaging/RELEASE_NOTES.md
           generate_release_notes: true
