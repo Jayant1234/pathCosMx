@@ -196,9 +196,10 @@ whatever OpenSlide reads; plain TIFFs fall back to pyvips) or paste its full pat
 or **Continue with H&E → register**. Where no native file dialog exists (headless, over SSH) the paste field is
 the way in; `server/picker.py` has a `provider` hook for a desktop shell's dialog.
 
-Registration (`server/register.py`): **Automatic** runs Pathogene's mask registration (vendored, unchanged:
-16-orientation centroid + grid search of scale/shift on tissue masks) on thumbnails, the CosMx side drawn
-from cell positions, then an OpenCV ECC affine refinement at 1024 and 4096 px. **Anchor points**: click a
+Registration (`server/register.py`): **Automatic** takes the H&E tissue mask from Pathogene
+(`auto_orientation.create_he_mask`, vendored unchanged), then PathQC's own search: FFT cross-correlation of the
+H&E mask with a mask drawn from cell positions over both mirrors, 10° rotations and a scale range, then an OpenCV
+ECC affine refinement at 1024 and 4096 px, with confidence checks (fit, margin, resolution, local tiles). **Anchor points**: click a
 landmark on the H&E, then on the stand-in, ≥ 3 pairs (Pathogene's similarity fit, mirror allowed), optionally
 refined the same way. Check the overlay (cells over the H&E, opacity slider), then **Accept**: the viewer
 opens with the H&E as the slide panel ("H&E") and every overlay mapped through the new transform. Tiles come
