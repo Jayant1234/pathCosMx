@@ -13,7 +13,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14            # Apple Silicon
+          - os: macos-15            # Apple Silicon (macos-14's Playwright WebKit is frozen and hung for 6 h)
             name: macos-arm64
             exe: dist/PathQC.app/Contents/MacOS/PathQC
             browsers: chromium webkit
@@ -30,6 +30,7 @@ jobs:
             exe: dist/PathQC/PathQC
             browsers: chromium webkit
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
@@ -37,9 +38,9 @@ jobs:
       PYTHONUTF8: "1"
       SHOTS: screens
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -74,17 +75,21 @@ jobs:
           fi
 
       - name: UI tests against the frozen app (chromium)
+        timeout-minutes: 20
         run: python tests/ui_test.py --exe "${{ matrix.exe }}" --shots "$SHOTS/ui-chromium" --browser chromium --port 8020
 
       - name: UI tests against the frozen app (webkit)
+        timeout-minutes: 20
         if: runner.os == 'macOS'
         run: python tests/ui_test.py --exe "${{ matrix.exe }}" --shots "$SHOTS/ui-webkit" --browser webkit --port 8030
 
       - name: Registration tests (source, reduced hard set)
+        timeout-minutes: 20
         if: runner.os == 'Linux'
         run: python tests/test_registration.py --hard easy_rot90,full_hard,rot15
 
       - name: Open the app like Finder does and screenshot its window
+        timeout-minutes: 20
         if: runner.os == 'macOS'
         run: |
           set -x
@@ -125,7 +130,7 @@ jobs:
           cp "$D/pathqc.log" "$SHOTS/window/pathqc.log" || true
           ls -la "$SHOTS/window"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: screens-${{ matrix.name }}
@@ -143,7 +148,7 @@ jobs:
           fi
           ls -la PathQC-*
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: PathQC-${{ matrix.name }}
           path: PathQC-${{ matrix.name }}.*
@@ -156,7 +161,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           pattern: PathQC-*
           merge-multiple: true
