@@ -81,7 +81,7 @@ def create_app(pack_dir, results_dir=None, image_transform=None):
             "vocab": s.vocab,
             "comments": [geometry_out(c) for c in s.comments],
             "annotations": [geometry_out(a) for a in s.annotations],
-            "ops": [summarise_op(o) for o in s.active_ops()],
+            "ops": ops_out(s),
             "tag_names": TAG_NAMES,
         })
 
@@ -90,6 +90,17 @@ def create_app(pack_dir, results_dir=None, image_transform=None):
                                       "filter_ref", "filter_names", "scope", "sections",
                                       "n", "ts", "reviewer", "tool")} | {"geometry": {"type": "Polygon",
                                                                               "px": pack.geom_mm_to_px(o["mm"])}}
+
+    def live_ids(s):
+        """Ids of the edits that still decide at least one cell (an edit wiped by a later Clear, or painted
+        over entirely, is not live: its outline is not drawn)."""
+        _, _, opi = s.replay(pack.src)
+        act = s.active_ops()
+        return [act[k]["id"] for k in np.unique(opi[opi >= 0])]
+
+    def ops_out(s):
+        live = set(live_ids(s))
+        return [dict(summarise_op(o), live=o["id"] in live) for o in s.active_ops()]
 
     @app.route("/api/cells.bin")
     def cells_bin():
@@ -236,12 +247,14 @@ def create_app(pack_dir, results_dir=None, image_transform=None):
             abort(400, "op must be base, relabel or clear")
         if idx.size == 0:
             abort(400, "no cells in this region (after the class filter)")
-        return jsonify(summarise_op(s.add_op(op)))
+        op = s.add_op(op)
+        return jsonify(dict(summarise_op(op), live=True, live_ids=live_ids(s)))
 
     @app.route("/api/undo", methods=["POST"])
     def undo():
-        t = sess().undo((request.get_json() or {}).get("target"))
-        return jsonify({"undone": t and summarise_op(t)})
+        s = sess()
+        t = s.undo((request.get_json() or {}).get("target"))
+        return jsonify({"undone": t and summarise_op(t), "live_ids": live_ids(s)})
 
     @app.route("/api/reset", methods=["POST"])
     def reset():

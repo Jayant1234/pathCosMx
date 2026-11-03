@@ -527,6 +527,40 @@ def test_C(page, app, shots):
     check(len(sel_list(page)) == 0, "Esc deselects")
     shot(page, shots, "C7_final")
 
+    # Clear all sections also removes the drawn region outlines of the wiped edits (and Undo brings them back)
+    rel_px = """(() => { let n = 0; for (const c of PathQC.S.panels[1].el.querySelectorAll('canvas')) {
+      const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+      for (let i = 0; i < d.length; i += 4) if (d[i + 3] > 200 && Math.abs(d[i] - 214) < 8 && Math.abs(d[i + 1] - 51) < 8 && Math.abs(d[i + 2] - 108) < 8) n++; }
+      return n; })()"""                                   # the relabel outline colour (#d6336c) on the layer panel
+    live = lambda: [o["id"] for o in app.get(f"/api/state?reviewer={R}")["ops"] if not o.get("scope") and o.get("live", True)]
+    n_ops = page.evaluate("PathQC.S.ops.length")
+    page.wait_for_timeout(300)
+    px0, live0 = page.evaluate(rel_px), live()
+    check(px0 > 50 and live0, f"region edits are drawn before Clear ({px0} outline px, {len(live0)} live edits)")
+    page.click("#layerClearBtn")
+    page.locator("#ctx .mi", has_text="all sections").click()
+    wait_ops(page, n_ops + 1)
+    page.wait_for_timeout(300)
+    px1 = page.evaluate(rel_px)
+    check(px1 < 0.05 * px0, f"Clear all sections: no region outlines left ({px0} -> {px1} px)")
+    check(not live() and page.evaluate("PathQC.S.ops.every(o => o.scope || o.live === false)"),
+          "Clear all: every region edit is marked not in effect (server and viewer)")
+    shot(page, shots, "C8_cleared_no_outlines")
+    page.keyboard.press("Control+z")
+    wait_ops(page, n_ops)
+    page.wait_for_timeout(300)
+    px2 = page.evaluate(rel_px)
+    check(px2 > 0.8 * px0 and set(live()) == set(live0), f"Undo of the Clear brings the outlines back ({px2} px)")
+    page.click("#layerClearBtn")                         # Clear again, then reload: the page starts from /api/state
+    page.locator("#ctx .mi", has_text="all sections").click()
+    wait_ops(page, n_ops + 1)
+    page.reload()
+    page.wait_for_function("window.PathQC && PathQC.S.final && PathQC.S.ops.length === %d" % (n_ops + 1))
+    page.wait_for_timeout(600)
+    px3 = page.evaluate(rel_px)
+    check(px3 < 0.05 * px0 and page.evaluate("PathQC.S.ops.every(o => o.scope || o.live === false)"),
+          f"after a reload the cleared outlines stay gone ({px3} px)")
+
 
 # ------------------------------------------------------------------------------------------- step E
 EPI = ["Keratin", "Squam1", "Squam2", "Squam3", "Basal(core)", "Basal(stem)", "Basal(ifn)"]

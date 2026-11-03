@@ -361,7 +361,7 @@ const opColour = o => o.op === 'base' ? BASECOL[o.source] : o.op === 'clear' ? '
 
 function drawShapes(P, ctx, m) {
   if (S.showOps) for (const o of S.ops) {
-    if (o.scope) continue;              // whole-section picks and clears have no outline
+    if (o.scope || o.live === false) continue;     // whole-section ops have no outline; wiped edits (Clear) none either
     path(ctx, m, o.geometry.px); ctx.strokeStyle = opColour(o);
     if (P.mine) { ctx.lineWidth = 2; ctx.stroke(); ctx.globalAlpha = 0.07; ctx.fillStyle = opColour(o); ctx.fill(); ctx.globalAlpha = 1; }
     else { ctx.setLineDash([5, 4]); ctx.lineWidth = 1.3; ctx.stroke(); ctx.setLineDash([]); }
@@ -449,7 +449,7 @@ function hits(P, sx, sy) {      // everything under a screen point of one panel
   h.inSel = S.selList.length > 0 && ((h.cell != null && S.mask[h.cell] === 1) || S.selGeoms.some(g => g.mode !== 'sub' && g.type === 'Polygon' && inPoly(pt, g.px)));
   h.comment = S.comments.findIndex(c => { const [ax, ay] = m.toS(...anchor(c.geometry.px)); return Math.hypot(ax - sx, ay - 15 - sy) < 12 || (c.geometry.type === 'Polygon' && inPoly(pt, c.geometry.px)); });
   h.annotation = S.annotations.findIndex(a => inPoly(pt, a.geometry.px));
-  for (let k = S.ops.length - 1; k >= 0; k--) if (!S.ops[k].scope && inPoly(pt, S.ops[k].geometry.px)) { h.op = S.ops[k]; break; }
+  for (let k = S.ops.length - 1; k >= 0; k--) if (!S.ops[k].scope && S.ops[k].live !== false && inPoly(pt, S.ops[k].geometry.px)) { h.op = S.ops[k]; break; }
   return h;
 }
 
@@ -740,12 +740,14 @@ function renderEdit() {
     <table class="comp"><tr><th>Label</th><th>Yours</th>${SRC.map(k => `<th>${esc(shortName(k))}</th>`).join('')}</tr>${rows}</table>`;
 }
 
+function setLive(ids) { if (!ids) return; const live = new Set(ids); for (const o of S.ops) o.live = live.has(o.id); }
+
 async function applyOp(body, scoped = false) {
   if (applyOp.busy) return;                  // a double click sends one op
   applyOp.busy = true;
   try {
     const op = await api('/api/ops', { body });
-    S.ops.push(op); await loadFinal(); if (S.queue) loadQueue(S.queue.kind);
+    S.ops.push(op); setLive(op.live_ids); await loadFinal(); if (S.queue) loadQueue(S.queue.kind);
     const where = op.scope === 'all' ? 'all sections' : (op.sections || []).join(', ');
     toast(op.op === 'clear' ? `${layerName()} cleared for ${where} — Undo (Ctrl+Z) brings it back`
       : op.op === 'base' ? `${layerName()}: ${sourceName(op.source)} labels for ${scoped ? where : nCells(op.n)}`
@@ -762,7 +764,7 @@ async function undo(target) {
   try {
     const r = await api('/api/undo', { body: target ? { target } : {} });
     if (!r.undone) { toast('Nothing to undo'); return; }
-    S.ops = S.ops.filter(o => o.id !== r.undone.id); await loadFinal(); if (S.queue) loadQueue(S.queue.kind);
+    S.ops = S.ops.filter(o => o.id !== r.undone.id); setLive(r.live_ids); await loadFinal(); if (S.queue) loadQueue(S.queue.kind);
     toast('Undid: ' + opText(r.undone)); if (S.selList.length) selInfo(); renderAll();
   } catch (e) { fail(e); }
 }
@@ -1204,7 +1206,7 @@ function renderLog() {
     <p class="hint">Removes every edit, comment, annotation and label change of ${esc(S.reviewer)}. The session is archived, not deleted.</p>`;
   [...S.ops].reverse().forEach(o => {
     const it = el('div', 'item', `<div class="meta"><span class="keychip" style="--bc:${opColour(o)}">${o.op === 'base' ? (o.scope ? 'start' : 'picked') : o.op}</span><span>${esc(opText(o))}</span>
-      ${o.filter_name ? `<span class="tag">only ${esc(o.filter_name)}</span>` : ''}${o.filter_names ? `<span class="tag">only ${esc(o.filter_names.join(', '))} (${esc(o.filter_ref === 'corr' ? 'yours' : shortName(o.filter_ref))})</span>` : ''}${o.tool && o.tool !== 'section' ? `<span class="tag">${esc(o.tool)}</span>` : ''}<span>${esc(o.ts?.slice(11, 16))}</span></div>
+      ${o.filter_name ? `<span class="tag">only ${esc(o.filter_name)}</span>` : ''}${o.filter_names ? `<span class="tag">only ${esc(o.filter_names.join(', '))} (${esc(o.filter_ref === 'corr' ? 'yours' : shortName(o.filter_ref))})</span>` : ''}${o.tool && o.tool !== 'section' ? `<span class="tag">${esc(o.tool)}</span>` : ''}${!o.scope && o.live === false ? '<span class="tag" title="A later edit or Clear replaced all its cells; Undo that to bring it back">cleared</span>' : ''}<span>${esc(o.ts?.slice(11, 16))}</span></div>
       <div class="acts">${o.scope ? '' : '<button class="btn small" data-a="sel">Select region</button>'}<button class="btn small danger" data-a="undo">Undo</button></div>`);
     it.onclick = e => { const a = e.target.dataset.a; if (a === 'undo') undo(o.id); else if (a === 'sel') { flyTo(o.geometry.px); S.gestT0 = performance.now(); selectPolygon(o.geometry.px, S.panels[1], 'replace', 'reselect'); } else if (!o.scope) flyTo(o.geometry.px); };
     pane.querySelector('.list').append(it);
