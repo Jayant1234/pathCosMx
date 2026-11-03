@@ -1194,9 +1194,10 @@ def test_F(page, app, shots):
             st = json.loads(r.read())
         check(st["pack"]["name"] == "sealed_demo" and st["ready"], "next start opens the unlocked pack")
         print("PASS test_F: sealed pack offered; wrong password refused (nothing written); unlock switches; persists")
-    except Exception:
+    except Exception as e:
         print("---- app log ----\n" + log.read_text()[-4000:])
-        raise
+        tail = "\n".join(l for l in log.read_text().splitlines() if '" 200 -' not in l)[-1200:]
+        raise RuntimeError(f"{e!r} | app log: {tail}") from e
     finally:
         b_stop(proc)
 
@@ -1236,6 +1237,9 @@ def main():
                     except Exception:
                         pass
                     print(f"FAIL step {name}: {e}  page errors: {errors[:3]}")
+                    if os.environ.get("GITHUB_ACTIONS"):      # annotations are readable without a login
+                        msg = f"{args.browser} step {name}: {e}\n{traceback.format_exc()[-1500:]}".replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+                        print(f"::error title=UI test failed::{msg[:3000]}", flush=True)
                     failed.append(name)
                 page.close()
             browser.close()
