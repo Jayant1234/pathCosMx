@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PathQC · Start</title>
+<link rel="stylesheet" href="/web/app.css">
+<link rel="stylesheet" href="/web/start.css">
+</head>
+<body class="startpage">
+<header class="top">
+  <div class="brand">PathQC <small>start</small></div>
+  <div class="grow"></div>
+  <span class="hint mono" id="settingsFile"></span>
+</header>
+
+<main class="st-main">
+  <section class="st-step" id="stepSetup">
+    <div class="st-card">
+      <h2>Reviewer</h2>
+      <p class="hint">Your name labels every comment and edit; your layer is saved as <span class="mono">&lt;name&gt;_labels</span>.</p>
+      <input type="text" id="reviewer" class="inp st-inp" placeholder="Your name" autocomplete="name">
+    </div>
+
+    <div class="st-card">
+      <h2>Slide pack <span class="st-ok" id="packOk">● connected</span></h2>
+      <div id="packInfo" class="kv"></div>
+      <div class="row">
+        <button class="btn" id="pickPack">Choose another pack folder…</button>
+      </div>
+      <div class="row st-paste" id="packPasteRow" hidden>
+        <input type="text" id="packPath" class="inp st-inp" placeholder="Paste the pack folder's full path">
+        <button class="btn" id="packOpen">Open pack</button>
+      </div>
+    </div>
+
+    <div class="st-card">
+      <h2>H&amp;E <span class="hint">(optional)</span></h2>
+      <div id="heProblem" class="warnbox" hidden></div>
+      <div id="heInfo" class="kv"></div>
+      <div class="row">
+        <button class="btn" id="pickHe">Locate H&amp;E file…</button>
+        <span class="hint" id="heFormats"></span>
+      </div>
+      <div class="row st-paste">
+        <input type="text" id="hePath" class="inp st-inp" placeholder="…or paste the H&E file's full path">
+        <button class="btn" id="heOpen">Open</button>
+      </div>
+    </div>
+
+    <div class="st-actions">
+      <button class="btn" id="standinBtn" title="Use the image drawn from cell positions (not H&E)">Continue with stand-in</button>
+      <span class="grow"></span>
+      <button class="btn" id="savedHeBtn" hidden>Open with the registered H&amp;E</button>
+      <button class="btn primary" id="heBtn" disabled>Continue with H&amp;E → register</button>
+    </div>
+  </section>
+
+  <section class="st-step" id="stepReg" hidden>
+    <div class="st-card">
+      <h2>Register the H&amp;E to the slide <span class="hint" id="regHeName"></span></h2>
+      <p class="hint">Registration finds how the H&amp;E sits relative to the cell positions (rotation, mirror, scale, shift).
+        Check the overlay, then accept. Your comments and edits are stored in slide mm, so they follow.</p>
+      <nav class="tabs st-tabs" id="regTabs">
+        <button data-tab="auto" class="on">Automatic</button>
+        <button data-tab="anchors">Anchor points</button>
+      </nav>
+      <div data-pane="auto" class="st-pane on">
+        <div class="row"><button class="btn primary" id="regRun">Run automatic registration</button>
+          <span class="hint" id="regMsg"></span></div>
+        <div class="bar" id="regProg"><i style="width:0"></i></div>
+      </div>
+      <div data-pane="anchors" class="st-pane">
+        <p class="hint">Click a landmark on the <b>H&amp;E</b> (left), then the same place on the <b>stand-in</b> (right).
+          Three pairs or more, spread over the tissue. With “refine” on, the fit is then polished automatically.</p>
+        <div class="st-anchors">
+          <div><div class="st-cap">H&amp;E</div><canvas id="heCanvas"></canvas></div>
+          <div><div class="st-cap">Stand-in (cell positions)</div><canvas id="siCanvas"></canvas></div>
+        </div>
+        <div class="row"><span id="pairList" class="hint">No points yet.</span><span class="grow"></span>
+          <button class="btn small" id="anchorUndo">Undo point</button><button class="btn small" id="anchorClear">Clear</button>
+          <label class="ctl"><input type="checkbox" id="anchorRefine" checked> refine</label>
+          <button class="btn" id="anchorFit" disabled>Fit from points</button></div>
+      </div>
+    </div>
+
+    <div class="st-card" id="checkCard" hidden>
+      <h2>Check the overlay</h2>
+      <div id="regResult" class="kv"></div>
+      <div id="regWarn" class="warnbox" hidden></div>
+      <div class="row"><label class="ctl">Cells <input type="range" id="opacity" min="0" max="1" step="0.05" value="0.6"></label>
+        <span class="hint">Dots are cell positions mapped onto the H&amp;E; they should sit on the tissue and its nuclei.</span></div>
+      <canvas id="overlay"></canvas>
+    </div>
+
+    <div class="st-actions">
+      <button class="btn" id="regBack">← Back</button>
+      <span class="grow"></span>
+      <button class="btn primary" id="acceptBtn" disabled>Accept and open the viewer</button>
+    </div>
+  </section>
+</main>
+<div id="toast" class="toast" hidden></div>
+<script src="/web/start.js"></script>
+</body>
+</html>

@@ -1,5 +1,5 @@
 # real slide packs, tiles, sessions and results stay local (patient-derived data)
-packs/
+packs
 pack/raw/
 # generated demo pack (built by pack/make_demo_pack.py)
 demo_pack/

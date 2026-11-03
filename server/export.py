@@ -117,20 +117,43 @@ def write_results(pack, sess, out_root: Path):
     return out, final, root
 
 
-def slide_image(pack, sess, final, root, out_file: Path, status: dict, max_dim=None):
-    """Paint corrected labels, annotations and comment pins onto the base image, band by band.
+HE_EXPORT_UM = 1.0      # whole-slide export over the H&E: about the stand-in's resolution unless max_dim says otherwise
 
-    The base is streamed from disk and each painted band is written as its own compressed file,
-    so memory stays at about one band whatever the slide size.
-    """
-    base = pyvips.Image.new_from_file(str(pack.path / pack.transform["image"]["base"]))
+
+def _base(pack, max_dim):
+    """-> (W, H, scale, band(y0, h) -> (h, W, 3) uint8, close()): the slide image the export paints on.
+    Stand-in: its TIFF. H&E: the H&E file itself, read band by band from the pyramid level closest to
+    HE_EXPORT_UM um/px (a 40x scan is ~0.25 um/px, i.e. 16x the pixels), or to max_dim on the long side."""
+    img = pack.transform["image"]
+    if pack.transform.get("kind") == "he" and img.get("reader"):       # registered at start-up: read the H&E file
+        from .he import BandSource
+        W0, H0 = img["width"], img["height"]
+        scale = min(1.0, pack.transform.get("um_per_px", HE_EXPORT_UM) / HE_EXPORT_UM)
+        if max_dim:
+            scale = min(1.0, max_dim / max(W0, H0))
+        src = BandSource(img["base"], scale)
+        return src.width, src.height, src.scale, src.band, src.close
+    base = pyvips.Image.new_from_file(str(pack.path / img["base"]))
     if base.bands == 4:
         base = base.flatten()
     scale = 1.0
     if max_dim and max(base.width, base.height) > max_dim:
         scale = max_dim / max(base.width, base.height)
         base = base.resize(scale)
-    W, H = base.width, base.height
+
+    def band(y0, h):
+        return np.ndarray(buffer=base.crop(0, y0, base.width, h).write_to_memory(), dtype=np.uint8,
+                          shape=(h, base.width, base.bands))[..., :3].copy()
+    return base.width, base.height, scale, band, lambda: None
+
+
+def slide_image(pack, sess, final, root, out_file: Path, status: dict, max_dim=None):
+    """Paint corrected labels, annotations and comment pins onto the base image, band by band.
+
+    The base is streamed from disk and each painted band is written as its own compressed file,
+    so memory stays at about one band whatever the slide size.
+    """
+    W, H, scale, band, close = _base(pack, max_dim)
     colour = {v["code"]: _hex(v["color"]) for v in sess.vocab}
     rgb = np.array([colour.get(int(root[c]), (128, 128, 128)) for c in range(256)], np.uint8)
     px, py = pack.px * scale, pack.py * scale
@@ -150,8 +173,7 @@ def slide_image(pack, sess, final, root, out_file: Path, status: dict, max_dim=N
     try:
         for k, y0 in enumerate(range(0, H, BAND)):
             h = min(BAND, H - y0)
-            arr = np.ndarray(buffer=base.crop(0, y0, W, h).write_to_memory(), dtype=np.uint8,
-                             shape=(h, W, base.bands))[..., :3].copy()
+            arr = band(y0, h)
             over = Image.fromarray(arr)
             draw = ImageDraw.Draw(over)
             lo, hi = np.searchsorted(pys, y0 - r), np.searchsorted(pys, y0 + h + r)
@@ -183,5 +205,6 @@ def slide_image(pack, sess, final, root, out_file: Path, status: dict, max_dim=N
         img.tiffsave(str(out_file), tile=True, pyramid=True, compression="jpeg", Q=90, bigtiff=True,
                      xres=1000 / um, yres=1000 / um)
     finally:
+        close()
         shutil.rmtree(tmp, ignore_errors=True)
     return out_file
