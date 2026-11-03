@@ -8,27 +8,62 @@ commit in `UPSTREAM_COMMIT.txt`): its OpenSeadragon viewer, DZI tiling and H&E r
 
 ## Get the app (pathologists)
 
-1. Download the latest build: **Actions → Build PathQC app → latest run → Artifacts →
-   `PathQC-macos-arm64`** (Apple Silicon Macs) or `PathQC-linux-x64`.
-2. **Mac:** unzip, move `PathQC.app` to Applications. The app is not signed by Apple yet, so the first
-   time: right-click → **Open** → **Open**. On macOS 15+, if that is not offered: System Settings →
-   Privacy & Security → **Open Anyway**. After that it opens with a double-click.
-3. The app opens in your browser. With no data it shows a **synthetic demo slide** (banner "DEMO").
-4. **Real data** is sent separately (a ~3 MB slide pack, never on GitHub): put the folder in
-   `~/Documents/PathQC/packs/<name>/` and restart the app. Your work and saved results stay in that folder.
-   The app's log is `~/Documents/PathQC/pathqc.log`.
+**1. Download.** Open the repository's **Releases** page (right-hand side on GitHub) and download the file
+for your computer from the latest release:
+
+| Computer | File |
+|---|---|
+| Mac with Apple chip (M1–M4) | `PathQC-macos-arm64.zip` |
+| Mac with Intel chip | `PathQC-macos-x64.zip` |
+| Windows 10 / 11 | `PathQC-windows-x64.zip` |
+| Linux | `PathQC-linux-x64.tar.gz` |
+
+(Not sure which Mac? Apple menu → About This Mac → "Chip".)
+
+**2. First open.** The app is not signed yet, so the computer asks once:
+
+- **Mac:** double-click the zip, drag `PathQC.app` into Applications. Right-click it → **Open** → **Open**.
+  If macOS only offers "Move to Bin": System Settings → Privacy & Security → scroll down → **Open Anyway**.
+  (Or in Terminal: `xattr -dr com.apple.quarantine /Applications/PathQC.app`.) Later: double-click.
+- **Windows:** right-click the zip → **Extract All**, open the `PathQC` folder, double-click `PathQC.exe`.
+  If SmartScreen says "Windows protected your PC": **More info → Run anyway**. Keep the exe inside its folder.
+- **Linux:** `tar -xzf PathQC-linux-x64.tar.gz && ./PathQC/PathQC`. On Linux the app opens in your web
+  browser (same app; keep the terminal open, Ctrl+C stops it). Mac and Windows get their own app window.
+
+**3. Start screen.** Type your name. The slide pack shown is the one found (with no data: a synthetic
+**demo** slide). Real data comes separately (a small slide pack, never on GitHub): put the folder in
+`Documents/PathQC/packs/` or use *Choose another pack folder…*. To see the real tissue, click
+*Locate H&E file…*, choose the slide (SVS, NDPI, MRXS, TIFF…), run the registration, check the overlay and
+**Accept**. Without an H&E: **Continue with stand-in**. The next start opens the viewer directly
+(header **Change slide / H&E** to come back here).
+
+**4. Review.** Pick the labels to start from (start card) → select cells (lasso, wand, region tools; Esc
+deselects) → relabel (keys 1–9) or pin a comment → work through the **Review** tab's queue (J = next item)
+→ **Save results** (top right). Ctrl+Z undoes. Your work is kept as you go; closing the window is safe.
+
+**5. Send results back.** Save writes a folder
+`Documents/PathQC/packs/<pack>/results/<YourName>_<date-time>/` (labels table, comments, annotations,
+corrected whole-slide image, edit log). Zip that folder (Mac: right-click → Compress; Windows: right-click →
+Send to → Compressed folder) and email or upload it to us. Problems? Send `Documents/PathQC/pathqc.log` too.
 
 ## Run from source (developers)
 
 ```bash
 python -m venv ~/envs/pathqc && ~/envs/pathqc/bin/pip install -r requirements.txt
-~/envs/pathqc/bin/python run.py              # opens http://127.0.0.1:8010 (next free port if taken)
-# on a remote machine: ssh -L 8010:127.0.0.1:8010 <host>, then open the URL locally
+~/envs/pathqc/bin/python run.py              # app window (needs pywebview), else the browser; port 8010 or next free
+~/envs/pathqc/bin/python run.py --browser    # always the browser
+~/envs/pathqc/bin/python run.py --no-browser # server only; on a remote machine: ssh -L 8010:127.0.0.1:8010 <host>
 ```
 
-Build the app locally: `pip install -r packaging/requirements-app.txt && bash packaging/build_app.sh`,
-then `python packaging/smoke_test.py dist/PathQC/PathQC` (Linux) or `dist/PathQC.app/Contents/MacOS/PathQC`
-(macOS). GitHub Actions (`.github/workflows/app.yml`) does both on every push to `main`.
+The running app writes its address to `~/Documents/PathQC/server.json` (and `pathqc.log`); closing the window
+stops the server. `PathQC --check-gui` reports whether the window backend loads (macOS: pyobjc/WKWebView;
+Windows: pythonnet/Edge WebView2; Linux: GTK or Qt bindings, not bundled, so the Linux build uses the browser).
+
+Build the app (any OS): `pip install -r packaging/requirements-app.txt && python packaging/build_app.py`
+→ macOS `dist/PathQC.app`, Windows `dist/PathQC/PathQC.exe`, Linux `dist/PathQC/PathQC`. Then
+`python packaging/smoke_test.py <exe>` and `python tests/ui_test.py --exe <exe> --shots <dir>`. GitHub Actions
+(`.github/workflows/app.yml`) builds and tests on macOS arm64 + Intel, Windows and Linux on every push to
+`main`; pushing a tag `v*` attaches the four packages to a GitHub Release.
 
 ## Build a slide pack (our side, once per slide)
 

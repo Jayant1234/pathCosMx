@@ -4,7 +4,7 @@
 Checks: page, state, cells, tiles, a region pick + relabel, undo, and Save with the slide image.
 Exit 0 only if every check passes. On failure prints the app's log and emits GitHub annotations.
 
-Usage: python packaging/smoke_test.py <path to the PathQC executable>
+Usage: python packaging/smoke_test.py <path to the PathQC executable> [port, default 8765]
 """
 import json
 import os
@@ -15,7 +15,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-PORT = 8765
+PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8765
 BASE = f"http://127.0.0.1:{PORT}"
 R = "ci_reviewer"
 
@@ -31,7 +31,7 @@ def call(path, body=None, raw=False):
 def main():
     exe = Path(sys.argv[1]).resolve()
     home = Path(tempfile.mkdtemp(prefix="pathqc_home_"))
-    env = dict(os.environ, HOME=str(home), USERPROFILE=str(home))
+    env = dict(os.environ, HOME=str(home), USERPROFILE=str(home), PATHQC_NO_DIALOG="1")
     proc = subprocess.Popen([str(exe), "--no-browser", "--port", str(PORT)], env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     checks = []

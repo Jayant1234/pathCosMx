@@ -3,6 +3,7 @@ name: Build PathQC app
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -12,11 +13,29 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14          # Apple Silicon
+          - os: macos-14            # Apple Silicon
             name: macos-arm64
+            exe: dist/PathQC.app/Contents/MacOS/PathQC
+            browsers: chromium webkit
+          - os: macos-15-intel      # Intel (macos-13 was retired Dec 2025; GitHub drops Intel macOS after macOS 15, fall 2027)
+            name: macos-x64
+            exe: dist/PathQC.app/Contents/MacOS/PathQC
+            browsers: chromium webkit
+          - os: windows-latest
+            name: windows-x64
+            exe: dist/PathQC/PathQC.exe
+            browsers: chromium
           - os: ubuntu-latest
             name: linux-x64
+            exe: dist/PathQC/PathQC
+            browsers: chromium webkit
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: "1"
+      SHOTS: screens
     steps:
       - uses: actions/checkout@v4
 
@@ -28,19 +47,97 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r packaging/requirements-app.txt
+          pip install playwright
 
       - name: Build the app (bundles the synthetic demo pack only)
-        run: bash packaging/build_app.sh
+        run: python packaging/build_app.py
 
-      - name: Smoke test the built app
+      - name: Smoke test the built app (server only)
+        run: python packaging/smoke_test.py "${{ matrix.exe }}"
+
+      - name: The app window's backend loads inside the frozen app
         run: |
-          if [ "$RUNNER_OS" = "macOS" ]; then EXE=dist/PathQC.app/Contents/MacOS/PathQC; else EXE=dist/PathQC/PathQC; fi
-          python packaging/smoke_test.py "$EXE"
+          H="$RUNNER_TEMP/gui-home"; mkdir -p "$H"
+          set +e
+          HOME="$H" USERPROFILE="$H" PATHQC_HOME="$H" "${{ matrix.exe }}" --check-gui; code=$?
+          set -e
+          cat "$H/check-gui.json"; echo
+          if [ "$RUNNER_OS" = "Linux" ]; then echo "Linux: no window backend bundled, the app opens the browser (exit $code)"; exit 0; fi
+          exit $code
+
+      - name: Install Playwright browsers
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            python -m playwright install --with-deps ${{ matrix.browsers }}
+          else
+            python -m playwright install ${{ matrix.browsers }}
+          fi
+
+      - name: UI tests against the frozen app (chromium)
+        run: python tests/ui_test.py --exe "${{ matrix.exe }}" --shots "$SHOTS/ui-chromium" --browser chromium --port 8020
+
+      - name: UI tests against the frozen app (webkit)
+        if: runner.os == 'macOS'
+        run: python tests/ui_test.py --exe "${{ matrix.exe }}" --shots "$SHOTS/ui-webkit" --browser webkit --port 8030
+
+      - name: Registration tests (source, reduced hard set)
+        if: runner.os == 'Linux'
+        run: python tests/test_registration.py --hard easy_rot90,full_hard,rot15
+
+      - name: Open the app like Finder does and screenshot its window
+        if: runner.os == 'macOS'
+        run: |
+          set -x
+          mkdir -p "$SHOTS/window"
+          D="$HOME/Documents/PathQC"
+          wait_up() {                                     # the app writes its address to server.json
+            for i in $(seq 1 120); do
+              if [ -f "$D/server.json" ]; then
+                URL=$(python -c "import json,sys; print(json.load(open(sys.argv[1]))['url'])" "$D/server.json")
+                curl -sf "${URL}api/setup/state" > /dev/null && return 0
+              fi
+              sleep 1
+            done
+            cat "$D/pathqc.log" || true; return 1
+          }
+          quit_app() {                                    # Apple-event quit; never let a permission prompt hang the job
+            osascript -e 'quit app "PathQC"' & Q=$!
+            sleep 6; kill $Q 2>/dev/null || true
+            pkill -f PathQC.app/Contents/MacOS/PathQC || true
+            sleep 1
+          }
+          rm -f "$D/server.json" "$D/settings.json"
+          open dist/PathQC.app
+          wait_up
+          sleep 8
+          screencapture -x "$SHOTS/window/1_start_screen.png" || echo "::warning::screencapture failed (screen recording permission?)"
+          # finish the start screen through its API (reviewer + stand-in image), then reopen: straight to the viewer
+          curl -sf -X POST -H 'Content-Type: application/json' -d '{"name":"CI Reviewer"}' "${URL}api/setup/reviewer" > /dev/null
+          curl -sf -X POST -H 'Content-Type: application/json' -d '{}' "${URL}api/setup/standin" > /dev/null
+          quit_app
+          rm -f "$D/server.json"
+          open dist/PathQC.app
+          wait_up
+          sleep 15
+          screencapture -x "$SHOTS/window/2_viewer.png" || echo "::warning::screencapture failed (screen recording permission?)"
+          grep -i "no app window" "$D/pathqc.log" && { echo "::error::the app fell back to the browser on macOS"; exit 1; } || true
+          quit_app
+          cp "$D/pathqc.log" "$SHOTS/window/pathqc.log" || true
+          ls -la "$SHOTS/window"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screens-${{ matrix.name }}
+          path: screens
+          retention-days: 30
 
       - name: Package
         run: |
           if [ "$RUNNER_OS" = "macOS" ]; then
             ditto -c -k --sequesterRsrc --keepParent dist/PathQC.app PathQC-${{ matrix.name }}.zip
+          elif [ "$RUNNER_OS" = "Windows" ]; then
+            (cd dist && 7z a -tzip ../PathQC-${{ matrix.name }}.zip PathQC > /dev/null)
           else
             tar -czf PathQC-${{ matrix.name }}.tar.gz -C dist PathQC
           fi
@@ -51,3 +148,22 @@ jobs:
           name: PathQC-${{ matrix.name }}
           path: PathQC-${{ matrix.name }}.*
           retention-days: 30
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: PathQC-*
+          merge-multiple: true
+      - run: ls -la
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            PathQC-*.zip
+            PathQC-*.tar.gz
+          generate_release_notes: true
