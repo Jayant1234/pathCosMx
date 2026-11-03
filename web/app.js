@@ -27,7 +27,7 @@ const S = {
   sel: null, syncing: false, secBoxes: [], secTouched: [], secView: 0,
   // assisted selection: pack attributes, tool settings, walker seeds, review queue, efficiency log
   assist: null, gap: 30, jump: 0, compShift: [0, 0], novaeRes: null, comp: null, dom: {}, walk: null, queue: null,
-  selTool: null, selTools: [], selT0: 0, gestT0: 0, suggested: null, busy: false,
+  selTool: null, selTools: [], selT0: 0, gestT0: 0, suggested: null, busy: false, cardPending: null,
 };
 const layerName = () => `${S.reviewer.replace(/[^A-Za-z0-9_.-]+/g, '_')}_labels`;
 const sourceName = k => S.manifest.sources.find(s => s.key === k)?.name ?? k;
@@ -180,7 +180,7 @@ function buildPanels() {
 function renderStartCard() {
   const card = $('#startCard'); if (!card || !S.final) return;
   const k = S.secView = sectionInView(), b = S.secBoxes[k];
-  const show = !S.secTouched[k];
+  const show = !S.secTouched[k] && S.cardPending == null;      // hidden while its pick is on the way
   card.hidden = !show;
   if (!show || S.cardSec === k) return;
   S.cardSec = k;
@@ -188,7 +188,12 @@ function renderStartCard() {
     <div class="sc-b">${S.manifest.sources.map(s => `<button class="btn base" data-start="${s.key}" style="--bc:${BASECOL[s.key]}"><span><i class="dot"></i>${esc(s.name)}</span></button>`).join('')}</div>
     ${b.dev ? `<div class="warnbox">${esc(b.name)} is a dev section: Vestrum is in-sample here.</div>` : ''}
     <label class="sc-all" title="Sections you have already worked on keep their work (Restart from… overwrites)"><input type="checkbox" id="startAll"> apply to all sections not started yet</label>`;
-  card.querySelectorAll('[data-start]').forEach(x => x.onclick = () => { card.hidden = true; sectionOp('base', x.dataset.start, $('#startAll').checked ? 'untouched' : false); });
+  card.querySelectorAll('[data-start]').forEach(x => x.onclick = () => {
+    if (S.cardPending != null) return;                         // a fast double click sends one pick
+    S.cardPending = k; card.hidden = true;
+    Promise.resolve(sectionOp('base', x.dataset.start, $('#startAll').checked ? 'untouched' : false))
+      .finally(() => { S.cardPending = null; renderStartCard(); });
+  });
 }
 
 // all: true = every section, 'untouched' = sections with no picks / relabels yet, false = the section in view

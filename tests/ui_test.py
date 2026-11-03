@@ -1172,9 +1172,19 @@ def test_F(page, app, shots):
         with urllib.request.urlopen(base + "/api/setup/state") as r:
             k = [s["name"] for s in json.loads(r.read())["sealed"]].index("sealed_demo")     # the app may carry others
         pw, ub = f"[data-pw='{k}']", f"[data-unlock='{k}']"
+        t0 = time.time()
+        req = urllib.request.Request(base + "/api/setup/unlock", json.dumps({"file": "sealed_demo.pqc", "password": "nope-nope-nope"}).encode(),
+                                     {"Content-Type": "application/json"})
+        try:
+            urllib.request.urlopen(req, timeout=180)
+            raise AssertionError("a wrong password was accepted")
+        except urllib.error.HTTPError as e:
+            body = e.read().decode(errors="replace")
+            check(e.code == 400 and "Wrong password" in body, f"API: wrong password -> {e.code} {body[:300]}")
+        print(f"   wrong password refused in {time.time() - t0:.1f} s", flush=True)
         page.fill(pw, "not-the-password")
         page.click(ub)
-        page.wait_for_selector("#toast:not([hidden]) >> text=Wrong password")
+        page.wait_for_selector("#toast:not([hidden]) >> text=Wrong password", timeout=90000)
         check(not (home / "packs" / "sealed_demo").exists(), "wrong password leaves nothing on disk")
         page.fill(pw, "test-password-123")
         shot(page, shots, "F1_sealed_card")
@@ -1195,8 +1205,9 @@ def test_F(page, app, shots):
         check(st["pack"]["name"] == "sealed_demo" and st["ready"], "next start opens the unlocked pack")
         print("PASS test_F: sealed pack offered; wrong password refused (nothing written); unlock switches; persists")
     except Exception as e:
-        print("---- app log ----\n" + log.read_text()[-4000:])
-        tail = "\n".join(l for l in log.read_text().splitlines() if '" 200 -' not in l)[-1200:]
+        text = log.read_text() + ((home / "pathqc.log").read_text() if (home / "pathqc.log").exists() else "")   # frozen app: pathqc.log
+        tail = "\n".join(l for l in text.splitlines() if '" 200 -' not in l)[-1500:]
+        print("---- app log ----\n" + text[-4000:])
         raise RuntimeError(f"{e!r} | app log: {tail}") from e
     finally:
         b_stop(proc)
