@@ -13,6 +13,7 @@ An accepted registration is written to <pack>/he/<fingerprint id>/transform.json
 """
 import io
 import json
+import os
 import re
 import sys
 import threading
@@ -27,6 +28,29 @@ from . import picker, settings as S
 from .app import WEB, create_app
 
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+BASE = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))      # bundled files or checkout
+
+
+def sealed_files():
+    """Password-sealed packs shipped with the app (<app>/sealed/*.pqc), plus PATHQC_SEALED (a folder; tests)."""
+    dirs = [BASE / "sealed"] + ([Path(os.environ["PATHQC_SEALED"])] if os.environ.get("PATHQC_SEALED") else [])
+    return sorted({f.resolve() for d in dirs if d.is_dir() for f in d.glob("*.pqc")})
+
+
+def sealed_list():
+    from pack.seal import header
+    out = []
+    for f in sealed_files():
+        try:
+            h = header(f)[0]
+        except (OSError, ValueError):
+            continue
+        dest = S.home() / "packs" / Path(h["name"]).name
+        have = (dest / ".sealed_id").read_text().strip() if (dest / ".sealed_id").exists() else None
+        out.append({"file": f.name, "name": h["name"], "dataset": h.get("dataset", ""), "n_cells": h.get("n_cells"),
+                    "sections": h.get("sections", []), "path": str(dest.resolve()),
+                    "unlocked": have is not None and (dest / "manifest.json").exists(), "current": have == h["id"]})
+    return out
 HE_TILE = re.compile(r"^/tiles/(he_[0-9a-f]+)(\.dzi|_files/(\d+)/(\d+)_(\d+)\.jpeg)$")
 
 
@@ -167,6 +191,7 @@ class Shell:
             "job": {k: v for k, v in self.job.items() if k != "result"},
             "candidate": self.candidate,
             "exts": list(S.HE_EXTENSIONS),
+            "sealed": sealed_list(),
         }
         if self.he:
             out["he"] = dict(self.he["info"], fingerprint=self.he["fingerprint"])
@@ -307,9 +332,25 @@ def create_shell(pack, results=None, cli_transform=None, pack_from_cli=False, ho
             return jsonify(picker.pick_folder())
         return jsonify(picker.pick_file(exts=S.HE_EXTENSIONS))
 
+    @app.route("/api/setup/unlock", methods=["POST"])
+    def unlock():
+        """Decrypt a bundled sealed pack into <PathQC>/packs/<name>/ with the password, then switch to it."""
+        from pack.seal import WrongPassword, unseal
+        b = body()
+        f = next((f for f in sealed_files() if f.name == b.get("file")), None)
+        if not f:
+            abort(400, "no such sealed pack in this app")
+        try:
+            dest = unseal(f, b.get("password") or "", S.home() / "packs")
+        except WrongPassword:
+            abort(400, "Wrong password")
+        return pack_from(dest)
+
     @app.route("/api/setup/pack", methods=["POST"])
     def set_pack():
-        p = Path((body().get("path") or "").strip().strip('"').strip("'")).expanduser()
+        return pack_from(Path((body().get("path") or "").strip().strip('"').strip("'")).expanduser())
+
+    def pack_from(p):
         if not (p / "manifest.json").exists():
             abort(400, f"{p} is not a slide pack (no manifest.json in it)")
         try:

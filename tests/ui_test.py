@@ -1134,7 +1134,74 @@ def test_B(page, app, shots):
         b_stop(proc)
 
 
-STEPS = {"A": test_A, "B": test_B, "C": test_C, "E": test_E}
+def test_F(page, app, shots):
+    """Sealed real data: a demo copy sealed with a test password is offered on the start screen; a wrong password
+    is refused; the right one unlocks it into <PathQC>/packs, switches to it, and the next start opens it."""
+    from pack.seal import seal
+    port, exe = app.port + 2, app.exe
+    tmp = Path(tempfile.mkdtemp(prefix="pathqc_F_"))
+    src = tmp / "src"
+    shutil.copytree(app.pack, src, ignore=shutil.ignore_patterns("sessions", "results", "image", "*.json"))
+    m = json.loads((app.pack / "manifest.json").read_text())
+    m.update(pack="sealed_demo", demo=False, dataset="sealed test slide")
+    (src / "manifest.json").write_text(json.dumps(m))
+    seal(src, tmp / "sealed" / "sealed_demo.pqc", "test-password-123")
+    home = tmp / "home"
+    cmd = ([sys.executable, str(ROOT / "run.py")] if exe == "source" else [str(Path(exe).resolve())]) + ["--no-browser", "--port", str(port)]
+    env = dict(os.environ, PATHQC_HOME=str(home), HOME=str(tmp), USERPROFILE=str(tmp), PATHQC_NO_DIALOG="1", PATHQC_SEALED=str(tmp / "sealed"))
+    log = tmp / "app.log"
+    base = f"http://127.0.0.1:{port}"
+
+    def start():
+        p = subprocess.Popen(cmd, env=env, stdout=open(log, "a"), stderr=subprocess.STDOUT, cwd=str(tmp))
+        for _ in range(240):
+            try:
+                urllib.request.urlopen(base + "/api/setup/state", timeout=2)
+                return p
+            except Exception:
+                if p.poll() is not None:
+                    raise RuntimeError("app exited: " + log.read_text()[-3000:])
+                time.sleep(0.5)
+        raise RuntimeError("app did not answer")
+
+    proc = start()
+    try:
+        page.goto(base + "/start")
+        page.wait_for_selector("#sealedCard:not([hidden]) >> text=sealed_demo")
+        page.fill("#reviewer", "Sealed Tester")
+        with urllib.request.urlopen(base + "/api/setup/state") as r:
+            k = [s["name"] for s in json.loads(r.read())["sealed"]].index("sealed_demo")     # the app may carry others
+        pw, ub = f"[data-pw='{k}']", f"[data-unlock='{k}']"
+        page.fill(pw, "not-the-password")
+        page.click(ub)
+        page.wait_for_selector("#toast:not([hidden]) >> text=Wrong password")
+        check(not (home / "packs" / "sealed_demo").exists(), "wrong password leaves nothing on disk")
+        page.fill(pw, "test-password-123")
+        shot(page, shots, "F1_sealed_card")
+        page.click(ub)
+        page.wait_for_selector("text=unlocked, in use", timeout=120000)
+        shot(page, shots, "F2_unlocked")
+        with urllib.request.urlopen(base + "/api/setup/state") as r:
+            st = json.loads(r.read())
+        check(st["pack"]["name"] == "sealed_demo" and st["pack"]["n_cells"] == app.n, f"switched to the unlocked pack {st['pack']}")
+        check((home / "packs" / "sealed_demo" / "cells.tsv.gz").read_bytes() == (src / "cells.tsv.gz").read_bytes(), "cells identical")
+        page.click("#standinBtn")
+        page.wait_for_url("**/?reviewer=*")
+        page.wait_for_selector(".panel .ph .t")
+        b_stop(proc)
+        proc = start()                                     # next start: the unlocked pack, straight to the viewer
+        with urllib.request.urlopen(base + "/api/setup/state") as r:
+            st = json.loads(r.read())
+        check(st["pack"]["name"] == "sealed_demo" and st["ready"], "next start opens the unlocked pack")
+        print("PASS test_F: sealed pack offered; wrong password refused (nothing written); unlock switches; persists")
+    except Exception:
+        print("---- app log ----\n" + log.read_text()[-4000:])
+        raise
+    finally:
+        b_stop(proc)
+
+
+STEPS = {"A": test_A, "B": test_B, "C": test_C, "E": test_E, "F": test_F}
 
 
 def main():

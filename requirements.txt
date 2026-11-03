@@ -8,5 +8,6 @@ opencv-python-headless>=4.8
 pyvips>=2.2
 pyvips-binary>=8.16
 openslide-python>=1.3.1
+cryptography>=42
 openslide-bin>=4.0
 scipy>=1.11

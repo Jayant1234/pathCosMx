@@ -4,7 +4,7 @@
   python packaging/build_app.py          # run from anywhere; works in the repository root
 
 Output: macOS dist/PathQC.app · Windows dist/PathQC/PathQC.exe · Linux dist/PathQC/PathQC.
-Builds the synthetic demo pack first; real packs are never bundled.
+Builds the synthetic demo pack first. Real packs are bundled only password-sealed (sealed/*.pqc, pack/seal.py).
 """
 import subprocess
 import sys
@@ -24,8 +24,9 @@ EXCLUDE = ["pyarrow", "matplotlib", "tkinter", "IPython", "PyQt5", "PyQt6", "PyS
 
 def main():
     subprocess.run([sys.executable, "pack/make_demo_pack.py", "--out", "demo_pack"], cwd=ROOT, check=True)
+    data = DATA + [f"{f.relative_to(ROOT).as_posix()}:sealed" for f in sorted((ROOT / "sealed").glob("*.pqc"))]
     cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--windowed", "--name", "PathQC"]
-    for d in DATA:
+    for d in data:
         src, dst = d.split(":")
         cmd += ["--add-data", f"{src}{SEP}{dst}"]
     for h in HIDDEN + GUI:

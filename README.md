@@ -30,12 +30,13 @@ for your computer from the latest release:
 - **Linux:** `tar -xzf PathQC-linux-x64.tar.gz && ./PathQC/PathQC`. On Linux the app opens in your web
   browser (same app; keep the terminal open, Ctrl+C stops it). Mac and Windows get their own app window.
 
-**3. Start screen.** Type your name. The slide pack shown is the one found (with no data: a synthetic
-**demo** slide). Real data comes separately (a small slide pack, never on GitHub): put the folder in
-`Documents/PathQC/packs/` or use *Choose another pack folder…*. To see the real tissue, click
-*Locate H&E file…*, choose the slide (SVS, NDPI, MRXS, TIFF…), run the registration, check the overlay and
-**Accept**. Without an H&E: **Continue with stand-in**. The next start opens the viewer directly
-(header **Change slide / H&E** to come back here).
+**3. Start screen.** Type your name. The app carries the real slide **encrypted**: in the card
+*Real slide data (password protected)* type the password we gave you (by message, never by email with the
+link) and click **Unlock**. This happens once per computer; the slide is then kept in
+`Documents/PathQC/packs/hnsc_slide1/` and every later start opens it. Without the password the app only shows
+a synthetic **demo** slide. To see the real tissue, click *Locate H&E file…*, choose the slide (SVS, NDPI,
+MRXS, TIFF…), run the registration, check the overlay and **Accept**. Without an H&E: **Continue with
+stand-in**. The next start opens the viewer directly (header **Change slide / H&E** to come back here).
 
 **4. Review.** Pick the labels to start from (start card) → select cells (lasso, wand, region tools; Esc
 deselects) → relabel (keys 1–9) or pin a comment → work through the **Review** tab's queue (J = next item)
@@ -64,6 +65,20 @@ Build the app (any OS): `pip install -r packaging/requirements-app.txt && python
 `python packaging/smoke_test.py <exe>` and `python tests/ui_test.py --exe <exe> --shots <dir>`. GitHub Actions
 (`.github/workflows/app.yml`) builds and tests on macOS arm64 + Intel, Windows and Linux on every push to
 `main`; pushing a tag `v*` attaches the four packages to a GitHub Release.
+
+## Seal a pack into the app (our side)
+
+The app bundles every `sealed/*.pqc` file. A `.pqc` is a pack's `cells.tsv.gz` + `manifest.json` encrypted with
+AES-256-GCM under a key derived from a password (scrypt, ~0.5 s per guess); only the pack's name, dataset line and
+cell/section counts are readable without it. Never commit an unsealed pack.
+
+```bash
+python pack/seal.py packs/hnsc_slide1 sealed/hnsc_slide1.pqc --password-file ~/projects/pathCosMx-secrets/hnsc_slide1.password
+```
+
+Use a long random password and send it separately from the download link. Re-sealing after a label update
+(same name) makes the app offer "a newer version: unlock again"; reviewers' sessions and results are kept.
+The ciphertext is public: if the password leaks, re-seal with a new one and treat that copy as exposed.
 
 ## Build a slide pack (our side, once per slide)
 

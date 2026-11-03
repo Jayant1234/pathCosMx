@@ -26,6 +26,7 @@ function render(st) {
   $('#packInfo').innerHTML = kv([['Pack', `<b>${esc(p.name)}</b>${p.demo ? ' <span class="tag dev">synthetic demo</span>' : ''}`], ['Dataset', esc(p.dataset)],
     ['Cells', fmt(p.n_cells)], ['Sections', esc(p.sections.join(', '))], ['Folder', `<span class="mono">${esc(p.path)}</span>`],
     ['Slide image now', st.image === 'he' ? '<b>H&amp;E</b> · ' + esc(st.registration?.summary || '') : 'stand-in (drawn from cell positions)']]);
+  renderSealed(st);
   const prob = $('#heProblem');
   prob.hidden = !st.problem;
   if (st.problem) prob.innerHTML = `${esc(st.problem)} <b>Locate the file again</b>, or continue with the stand-in.`;
@@ -44,6 +45,29 @@ function render(st) {
   if (h && h.registered) { sb.hidden = false; sb.textContent = 'Open with its saved registration'; sb.onclick = useHe; }
   else if (st.ready) { sb.hidden = false; sb.textContent = `Open the viewer (${st.image === 'he' ? 'H&E' : 'stand-in'})`; sb.onclick = () => saveReviewer().then(ok => ok && go('/?reviewer=' + encodeURIComponent(ok))); }
   else if (s && !st.problem && st.chosen === 'standin') { sb.hidden = false; sb.textContent = 'Use the registered H&E'; sb.onclick = useHe; }
+}
+
+function renderSealed(st) {
+  const list = st.sealed || [];
+  $('#sealedCard').hidden = !list.length;
+  $('#sealedList').innerHTML = list.map((s, i) => {
+    const info = `<b>${esc(s.name)}</b> · ${esc(s.dataset)} · ${fmt(s.n_cells)} cells · ${esc(s.sections.join(', '))}`;
+    if (s.current && s.path === st.pack.path) return `<div class="row">${info} <span class="st-ok">● unlocked, in use</span></div>`;
+    if (s.current) return `<div class="row">${info} <span class="st-ok">● unlocked</span><span class="grow"></span><button class="btn" data-open="${i}">Use this slide</button></div>`;
+    return `<div class="row">${info}${s.unlocked ? ' <span class="hint">(a newer version: unlock again; your work is kept)</span>' : ''}</div>
+      <div class="row st-paste"><input type="password" class="inp st-inp" data-pw="${i}" placeholder="Password" autocomplete="off">
+      <button class="btn primary" data-unlock="${i}">Unlock</button></div>`;
+  }).join('');
+  const unlock = async i => {
+    const inp = document.querySelector(`[data-pw="${i}"]`), b = document.querySelector(`[data-unlock="${i}"]`);
+    if (!inp.value) { toast('Type the password'); inp.focus(); return; }
+    b.disabled = true; b.textContent = 'Unlocking… (first time: drawing the slide, up to a minute)';
+    try { render(await api('/api/setup/unlock', { file: list[i].file, password: inp.value })); toast('Unlocked: real slide connected'); }
+    catch (e) { fail(e); b.disabled = false; b.textContent = 'Unlock'; inp.select(); }
+  };
+  document.querySelectorAll('[data-unlock]').forEach(b => b.onclick = () => unlock(+b.dataset.unlock));
+  document.querySelectorAll('[data-pw]').forEach(x => x.onkeydown = e => { if (e.key === 'Enter') unlock(+x.dataset.pw); });
+  document.querySelectorAll('[data-open]').forEach(b => b.onclick = () => openPack(list[+b.dataset.open].path));
 }
 
 async function saveReviewer() {
